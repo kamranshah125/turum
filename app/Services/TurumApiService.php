@@ -18,6 +18,8 @@ class TurumApiService
     protected function getClient()
     {
         return Http::withoutVerifying()->withToken($this->authService->getToken())
+            ->timeout(60) // 60 seconds timeout
+            ->retry(3, 2000) // Retry 3 times, wait 2000ms
             ->acceptJson();
     }
 
@@ -26,7 +28,7 @@ class TurumApiService
         Log::info('Creating Turum Reservation', ['variants' => $variants]);
 
         // Mocking response as per user request to not run actual logic/login
-        return ['reservation_id' => 'mock-reservation-' . uniqid()]; 
+        return ['reservation_id' => 'mock-reservation-' . uniqid()];
         // $variants format: [['variant_id' => 'UUID', 'quantity' => 1], ...]
         // try {
         //     $response = $this->getClient()->post($this->baseUrl . '/reservations', [
