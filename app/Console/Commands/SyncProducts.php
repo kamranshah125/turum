@@ -59,12 +59,15 @@ class SyncProducts extends Command
 
         // Check for common wrapper keys
         $items = $products['products'] ?? $products['data'] ?? $products;
+        $activeTurumSkus = [];
 
         foreach ($items as $tProduct) {
 
             $sku = $tProduct['sku'] ?? null;
             if (!$sku)
                 continue;
+
+            $activeTurumSkus[] = (string) $sku;
 
             $this->info("Processing SKU: $sku");
 
@@ -84,22 +87,31 @@ class SyncProducts extends Command
             }
         }
 
+        $this->info("Checking for stale products to draft...");
+        $draftedCount = $this->shopifyService->draftStaleProducts($activeTurumSkus);
+        $this->info("Drafted {$draftedCount} stale product(s).");
+
         $this->info('Product Sync Complete.');
     }
 
     protected function createAndSyncProduct($tProduct)
     {
-        // log::info($tProduct);
+        log::info($tProduct);
         // Map Turum Product to Shopify Payload
         // Variants formatting
         $variantsPayload = [];
+        $markupPercentage = config('services.turum.price_markup_percentage', 0);
+
         foreach ($tProduct['variants'] as $tVariant) {
             // User requested EU Size (e.g. 38, 42) instead of US (5.5, 7)
             $sizeOption = $tVariant['eu_size'] ?? $tVariant['size'] ?? 'Default';
 
+            $originalPrice = $tVariant['price'] ?? 0;
+            $markedUpPrice = $originalPrice + ($originalPrice * ($markupPercentage / 100));
+
             $variantsPayload[] = [
                 'option1' => $sizeOption,
-                'price' => $tVariant['price'] ?? 0,
+                'price' => round($markedUpPrice, 2),
                 'sku' => $tProduct['sku'],
                 'inventory_management' => 'shopify',
                 'inventory_quantity' => $tVariant['stock'] ?? 0
@@ -163,10 +175,15 @@ class SyncProducts extends Command
         $locationId = $this->shopifyService->getPrimaryLocationId();
 
         $actionType = $isNew ? '[NEW]' : '[UPDATE]';
+        $markupPercentage = config('services.turum.price_markup_percentage', 0);
 
         foreach ($turumVariants as $tVariant) {
             // Use EU size for matching if that's what we used to create it
             $size = $tVariant['eu_size'] ?? $tVariant['size'] ?? '';
+
+            $originalPrice = $tVariant['price'] ?? 0;
+            $markedUpPrice = $originalPrice + ($originalPrice * ($markupPercentage / 100));
+            $finalPrice = round($markedUpPrice, 2);
 
             // Find matching Shopify Variant
             $shopifyVariant = null;
@@ -181,14 +198,14 @@ class SyncProducts extends Command
             if ($shopifyVariant) {
                 // 1. Update Inventory / Price
                 $this->shopifyService->updateVariant($shopifyVariant['id'], [
-                    'price' => $tVariant['price']
+                    'price' => $finalPrice
                 ]);
 
                 // 2. Update Inventory Level
                 if ($locationId && isset($shopifyVariant['inventory_item_id'])) {
                     $stock = $tVariant['stock'] ?? 0;
                     $this->shopifyService->setInventoryLevel($shopifyVariant['inventory_item_id'], $locationId, $stock);
-                    $this->info("    - {$actionType} Variant (Size {$size}): Price set to {$tVariant['price']} | Stock set to {$stock}");
+                    $this->info("    - {$actionType} Variant (Size {$size}): Price set to {$finalPrice} (Original: {$originalPrice}) | Stock set to {$stock}");
                 }
 
                 // 3. Set Metafield

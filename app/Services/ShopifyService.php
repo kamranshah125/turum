@@ -31,8 +31,8 @@ class ShopifyService
             'X-Shopify-Access-Token' => $this->token,
             'Content-Type' => 'application/json'
         ])
-            ->timeout(60) // 60 seconds timeout (default was likely 10s based on the error)
-            ->retry(3, 2000); // Retry 3 times, wait 2000ms (2s) between retries
+            ->timeout(60)
+            ->retry(3, 2000, null, false);
     }
 
     public function fulfillOrder($shopifyOrderId, $trackingNumber, $trackingUrl, $carrier = 'DPD')
@@ -220,6 +220,27 @@ gql;
             return $response->json()['product'] ?? null;
         }
 
+        // Retry without images if we hit an invalid image URL error
+        if ($response->status() === 422) {
+            $responseBody = $response->json() ?? [];
+            $errorString = json_encode($responseBody['errors'] ?? []);
+
+            if (str_contains($errorString, 'Image URL is invalid') && !empty($data['product']['images'])) {
+                Log::warning("Creating product failed due to invalid image URL. Retrying without images.", ['title' => $data['product']['title'] ?? '']);
+
+                unset($data['product']['images']);
+                $response2 = $this->getClient()->post($endpoint, $data);
+
+                if ($response2->successful()) {
+                    return $response2->json()['product'] ?? null;
+                }
+
+                Log::error("Failed to create Shopify product even without images", ['body' => $response2->body()]);
+                return null;
+            }
+        }
+
+        Log::error("Failed to create Shopify product", ['body' => $response->body()]);
         return null;
     }
 
@@ -283,6 +304,89 @@ gql;
         }
 
         return null;
+    }
+
+    public function draftStaleProducts(array $activeSkus)
+    {
+        $draftedCount = 0;
+        $hasNextPage = true;
+        $cursor = null;
+
+        while ($hasNextPage) {
+            $query = <<<'gql'
+            query($cursor: String) {
+              products(first: 250, after: $cursor, query: "vendor:Turum AND status:ACTIVE") {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                edges {
+                  node {
+                    id
+                    legacyResourceId
+                    variants(first: 10) {
+                      edges {
+                        node {
+                          sku
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+gql;
+
+            $variables = $cursor ? ['cursor' => $cursor] : [];
+            $result = $this->graphQL($query, $variables);
+
+            $productsData = $result['data']['products'] ?? null;
+            if (!$productsData) {
+                Log::error('Failed to fetch Shopify products for drafting.', ['result' => $result]);
+                break;
+            }
+
+            $edges = $productsData['edges'] ?? [];
+            foreach ($edges as $edge) {
+                $node = $edge['node'];
+                $productId = $node['legacyResourceId'];
+                $variants = $node['variants']['edges'] ?? [];
+
+                $productSkus = [];
+                foreach ($variants as $vEdge) {
+                    $sku = $vEdge['node']['sku'] ?? null;
+                    if ($sku) {
+                        $productSkus[] = (string) $sku;
+                    }
+                }
+
+                // If none of the product's SKUs are in the active Turum feed
+                $isActive = false;
+                foreach ($productSkus as $sku) {
+                    if (in_array($sku, $activeSkus)) {
+                        $isActive = true;
+                        break;
+                    }
+                }
+
+                if (!$isActive && !empty($productSkus)) {
+                    Log::info("Drafting stale product ID: {$productId}, SKUs: " . implode(', ', $productSkus));
+
+                    $this->updateProduct($productId, [
+                        'product' => [
+                            'id' => $productId,
+                            'status' => 'draft'
+                        ]
+                    ]);
+                    $draftedCount++;
+                }
+            }
+
+            $hasNextPage = $productsData['pageInfo']['hasNextPage'] ?? false;
+            $cursor = $productsData['pageInfo']['endCursor'] ?? null;
+        }
+
+        return $draftedCount;
     }
 
     public function cancelOrder($orderId, $reason = 'inventory_shortage')

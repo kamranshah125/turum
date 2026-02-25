@@ -19,7 +19,7 @@ class TurumApiService
     {
         return Http::withoutVerifying()->withToken($this->authService->getToken())
             ->timeout(60) // 60 seconds timeout
-            ->retry(3, 2000) // Retry 3 times, wait 2000ms
+            ->retry(3, 2000, null, false) // Retry 3 times, wait 2000ms
             ->acceptJson();
     }
 

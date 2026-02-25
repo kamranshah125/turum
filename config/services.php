@@ -37,6 +37,7 @@ return [
     'turum' => [
         'username' => env('TURUM_USERNAME'),
         'password' => env('TURUM_PASSWORD'),
+        'price_markup_percentage' => env('TURUM_PRICE_MARKUP_PERCENTAGE', 35),
     ],
 
     'slack' => [

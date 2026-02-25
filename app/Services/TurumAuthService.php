@@ -22,7 +22,7 @@ class TurumAuthService
     public function login()
     {
         try {
-            $response = Http::timeout(60)->retry(3, 2000)->post($this->baseUrl . '/account/login', [
+            $response = Http::timeout(60)->retry(3, 2000, null, false)->post($this->baseUrl . '/account/login', [
                 'username' => config('services.turum.username'),
                 'password' => config('services.turum.password'),
             ]);
