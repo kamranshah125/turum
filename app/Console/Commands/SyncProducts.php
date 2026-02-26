@@ -38,6 +38,7 @@ class SyncProducts extends Command
     public function handle()
     {
         $this->info('Starting Product Sync...');
+        Log::info('--- Turum Product Sync Started ---');
 
         // 1. Fetch full product list from Turum
         // Expecting structure: [ { "id": "...", "sku": "...", "variants": [...], "name": "..." }, ... ]
@@ -60,6 +61,8 @@ class SyncProducts extends Command
         // Check for common wrapper keys
         $items = $products['products'] ?? $products['data'] ?? $products;
         $activeTurumSkus = [];
+
+        Log::info('Fetched ' . count($items) . ' products from Turum. Processing updates...');
 
         foreach ($items as $tProduct) {
 
@@ -91,12 +94,15 @@ class SyncProducts extends Command
         $draftedCount = $this->shopifyService->draftStaleProducts($activeTurumSkus);
         $this->info("Drafted {$draftedCount} stale product(s).");
 
+        Log::info("--- Turum Product Sync Complete --- [Drafted: {$draftedCount} stale products]");
         $this->info('Product Sync Complete.');
     }
 
     protected function createAndSyncProduct($tProduct)
     {
-        log::info($tProduct);
+
+        Log::info('--- Turum Product Create and  Sync Started ---');
+
         // Map Turum Product to Shopify Payload
         // Variants formatting
         $variantsPayload = [];
