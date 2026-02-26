@@ -28,35 +28,35 @@ class TurumApiService
         Log::info('Creating Turum Reservation', ['variants' => $variants]);
 
         // Mocking response as per user request to not run actual logic/login
-        return ['reservation_id' => 'mock-reservation-' . uniqid()];
+        // return ['reservation_id' => 'mock-reservation-' . uniqid()];
         // $variants format: [['variant_id' => 'UUID', 'quantity' => 1], ...]
-        // try {
-        //     $response = $this->getClient()->post($this->baseUrl . '/reservations', [
-        //         'variants' => $variants
-        //     ]);
-        //     log::info('response from reservation ' . ' ' . $response);
+        try {
+            $response = $this->getClient()->post($this->baseUrl . '/reservations', [
+                'variants' => $variants
+            ]);
+            log::info('response from reservation ' . ' ' . $response);
 
-        //     if ($response->successful()) {
-        //         return $response->json(); // Expected: { "reservation_id": "UUID" }
-        //     }
+            if ($response->successful()) {
+                return $response->json(); // Expected: { "reservation_id": "UUID" }
+            }
 
-        //     // If 401, maybe token expired? could retry once.
-        //     if ($response->status() === 401) {
-        //         $this->authService->login(); // Force refresh
-        //         $response = $this->getClient()->post($this->baseUrl . '/reservations', [
-        //             'variants' => $variants
-        //         ]);
-        //         if ($response->successful())
-        //             return $response->json();
-        //     }
+            // If 401, maybe token expired? could retry once.
+            if ($response->status() === 401) {
+                $this->authService->login(); // Force refresh
+                $response = $this->getClient()->post($this->baseUrl . '/reservations', [
+                    'variants' => $variants
+                ]);
+                if ($response->successful())
+                    return $response->json();
+            }
 
-        //     Log::error('Turum Reservation Failed', ['status' => $response->status(), 'body' => $response->body()]);
-        //     throw new \Exception('Turum Reservation Failed: ' . $response->body());
+            Log::error('Turum Reservation Failed', ['status' => $response->status(), 'body' => $response->body()]);
+            throw new \Exception('Turum Reservation Failed: ' . $response->body());
 
-        // } catch (\Exception $e) {
-        //     Log::error('Turum API Reservation Exception: ' . $e->getMessage());
-        //     throw $e;
-        // }
+        } catch (\Exception $e) {
+            Log::error('Turum API Reservation Exception: ' . $e->getMessage());
+            throw $e;
+        }
     }
 
     public function getReservation($reservationId)

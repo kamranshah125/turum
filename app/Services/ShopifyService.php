@@ -17,9 +17,9 @@ class ShopifyService
         $this->domain = config('services.shopify.domain'); // e.g., shop-name.myshopify.com
         $this->token = config('services.shopify.token');
 
-        log::info('shopify domain: ' . $this->domain);
+        // log::info('shopify domain: ' . $this->domain);
         // Do not log the token in production, but keeping it for debug as requested previously
-        log::info('shopify token *** set from env ***');
+        // log::info('shopify token *** set from env ***');
     }
 
     /**
