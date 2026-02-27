@@ -106,18 +106,26 @@ class SyncProducts extends Command
         // Map Turum Product to Shopify Payload
         // Variants formatting
         $variantsPayload = [];
-        $markupPercentage = config('services.turum.price_markup_percentage', 0);
+        $marginPercentage = config('services.turum.price_markup_percentage', 0);
+        $margin = $marginPercentage / 100;
+        if ($margin >= 1)
+            $margin = 0.99; // Prevent division by zero or negative price
 
         foreach ($tProduct['variants'] as $tVariant) {
             // User requested EU Size (e.g. 38, 42) instead of US (5.5, 7)
             $sizeOption = $tVariant['eu_size'] ?? $tVariant['size'] ?? 'Default';
 
             $originalPrice = $tVariant['price'] ?? 0;
-            $markedUpPrice = $originalPrice + ($originalPrice * ($markupPercentage / 100));
+
+            $calculatedPrice = $originalPrice;
+            if ($margin > 0 && $margin < 1) {
+                $calculatedPrice = $originalPrice / (1 - $margin);
+            }
+            $finalPrice = round($calculatedPrice, 2);
 
             $variantsPayload[] = [
                 'option1' => $sizeOption,
-                'price' => round($markedUpPrice, 2),
+                'price' => $finalPrice,
                 'sku' => $tProduct['sku'],
                 'inventory_management' => 'shopify',
                 'inventory_quantity' => $tVariant['stock'] ?? 0
@@ -171,7 +179,7 @@ class SyncProducts extends Command
 
     protected function syncVariants($shopifyProductId, $turumVariants, $productSku, $existingShopifyVariants = null, $isNew = false)
     {
-        // If we didn't pass existing variants, fetch them (though we only have product ID)
+        // If we didn't pass existing variants, fetch them
         if (!$existingShopifyVariants) {
             $this->warn("    - Syncing existing variants requires fetching all variants first. Skipped for this step.");
             return;
@@ -179,22 +187,34 @@ class SyncProducts extends Command
 
         // Get Location for Inventory Update
         $locationId = $this->shopifyService->getPrimaryLocationId();
+        if ($locationId && !str_starts_with($locationId, 'gid://')) {
+            $locationId = "gid://shopify/Location/{$locationId}";
+        }
 
         $actionType = $isNew ? '[NEW]' : '[UPDATE]';
-        $markupPercentage = config('services.turum.price_markup_percentage', 0);
+        $marginPercentage = config('services.turum.price_markup_percentage', 0);
+        $margin = $marginPercentage / 100;
+        if ($margin >= 1)
+            $margin = 0.99; // Prevent division by zero or negative price
+
+        $bulkVariantsPayload = [];
+        $bulkInventoryPayload = [];
 
         foreach ($turumVariants as $tVariant) {
-            // Use EU size for matching if that's what we used to create it
             $size = $tVariant['eu_size'] ?? $tVariant['size'] ?? '';
-
             $originalPrice = $tVariant['price'] ?? 0;
-            $markedUpPrice = $originalPrice + ($originalPrice * ($markupPercentage / 100));
-            $finalPrice = round($markedUpPrice, 2);
+
+            $calculatedPrice = $originalPrice;
+            if ($margin > 0 && $margin < 1) {
+                $calculatedPrice = $originalPrice / (1 - $margin);
+            }
+            $finalPrice = round($calculatedPrice, 2);
+            $stock = $tVariant['stock'] ?? 0;
+            $turumId = $tVariant['variant_id'];
 
             // Find matching Shopify Variant
             $shopifyVariant = null;
             foreach ($existingShopifyVariants as $sv) {
-                // Check option1 or title. Shopify titles usually "Option1 / Option2" or just "Option1"
                 if (($sv['option1'] ?? '') == $size || ($sv['title'] ?? '') == $size) {
                     $shopifyVariant = $sv;
                     break;
@@ -202,24 +222,69 @@ class SyncProducts extends Command
             }
 
             if ($shopifyVariant) {
-                // 1. Update Inventory / Price
-                $this->shopifyService->updateVariant($shopifyVariant['id'], [
-                    'price' => $finalPrice
-                ]);
+                $variantData = [
+                    'id' => "gid://shopify/ProductVariant/{$shopifyVariant['id']}",
+                    'price' => (string) $finalPrice,
+                    'inventoryItem' => [
+                        'tracked' => true
+                    ],
+                    'metafields' => [
+                        [
+                            'namespace' => 'turum',
+                            'key' => 'variant_id',
+                            'value' => (string) $turumId,
+                            'type' => 'single_line_text_field'
+                        ]
+                    ]
+                ];
 
-                // 2. Update Inventory Level
                 if ($locationId && isset($shopifyVariant['inventory_item_id'])) {
-                    $stock = $tVariant['stock'] ?? 0;
-                    $this->shopifyService->setInventoryLevel($shopifyVariant['inventory_item_id'], $locationId, $stock);
-                    $this->info("    - {$actionType} Variant (Size {$size}): Price set to {$finalPrice} (Original: {$originalPrice}) | Stock set to {$stock}");
+                    $inventoryItemId = $shopifyVariant['inventory_item_id'];
+
+                    // Shopify requires activating inventory tracking at a location for newly created variants
+                    // before trying to set their on-hand quantities via bulk operations.
+                    if ($isNew) {
+                        $this->shopifyService->activateInventoryLocation($inventoryItemId, $locationId);
+                    }
+
+                    $bulkInventoryPayload[] = [
+                        'inventoryItemId' => "gid://shopify/InventoryItem/{$inventoryItemId}",
+                        'locationId' => $locationId,
+                        'quantity' => (int) $stock
+                    ];
                 }
 
-                // 3. Set Metafield
-                $turumId = $tVariant['variant_id'];
-                $this->shopifyService->setVariantMetafield($shopifyVariant['id'], 'turum', 'variant_id', $turumId);
-                if ($isNew) {
-                    $this->info("    - [LINKED] New Variant Size {$size} linked to Turum ID {$turumId}");
+                $bulkVariantsPayload[] = $variantData;
+                $this->info("    - {$actionType} Prepared Variant Size {$size} (Cost: {$originalPrice} | Price: {$finalPrice} | Stock: {$stock})");
+            }
+        }
+
+        if (!empty($bulkVariantsPayload)) {
+            // Shopify allows up to 100 variants per bulk mutation
+            $chunks = array_chunk($bulkVariantsPayload, 100);
+            foreach ($chunks as $chunk) {
+                $success = $this->shopifyService->bulkUpdateVariants($shopifyProductId, $chunk);
+                if ($success) {
+                    $this->info("    -> Successfully bulk updated " . count($chunk) . " variants (Price/Metafields).");
+                } else {
+                    $this->error("    -> Failed to bulk update variants (Price/Metafields). See logs for details.");
                 }
+
+                usleep(300000);
+            }
+        }
+
+        if (!empty($bulkInventoryPayload)) {
+            // Shopify allows up to 250 inventory adjustments per bulk mutation
+            $inventoryChunks = array_chunk($bulkInventoryPayload, 250);
+            foreach ($inventoryChunks as $chunk) {
+                $success = $this->shopifyService->bulkUpdateInventoryLevels($chunk);
+                if ($success) {
+                    $this->info("    -> Successfully bulk updated " . count($chunk) . " inventory levels.");
+                } else {
+                    $this->error("    -> Failed to bulk update inventory levels. See logs for details.");
+                }
+                usleep(300000);
             }
         }
     }

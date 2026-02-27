@@ -262,6 +262,192 @@ gql;
         return $response->successful();
     }
 
+    /**
+     * Update multiple variants for a single product in one GraphQL request.
+     * $variants mapping example:
+     * [
+     *   [
+     *     'id' => 'gid://shopify/ProductVariant/123456',
+     *     'price' => '10.99',
+     *     'inventoryQuantities' => [
+     *         ['availableQuantity' => 5, 'locationId' => 'gid://shopify/Location/98765']
+     *     ]
+     *   ], ...
+     * ]
+     */
+    public function bulkUpdateVariants($productId, array $variants)
+    {
+        // GraphQL requires fully qualified GIDs
+        if (!str_starts_with($productId, 'gid://')) {
+            $productId = "gid://shopify/Product/{$productId}";
+        }
+
+        foreach ($variants as &$v) {
+            if (isset($v['id']) && !str_starts_with($v['id'], 'gid://')) {
+                $v['id'] = "gid://shopify/ProductVariant/{$v['id']}";
+            }
+        }
+
+        $query = <<<'gql'
+        mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+          productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+            product {
+              id
+            }
+            productVariants {
+              id
+              price
+              inventoryQuantity
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+        $response = $this->graphQL($query, [
+            'productId' => $productId,
+            'variants' => $variants
+        ]);
+
+        $errors = $response['data']['productVariantsBulkUpdate']['userErrors'] ?? [];
+        if (!empty($errors)) {
+            Log::error("Shopify Bulk Variant Update Errors", ['errors' => $errors]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Update inventory quantities for multiple variants in one GraphQL request.
+     * $inventoryData format:
+     * [
+     *    ['inventoryItemId' => 'gid://shopify/InventoryItem/123', 'locationId' => 'gid://shopify/Location/456', 'quantity' => 10],
+     *    ...
+     * ]
+     */
+    public function bulkUpdateInventoryLevels(array $inventoryData)
+    {
+        // GraphQL requires fully qualified GIDs
+        foreach ($inventoryData as &$item) {
+            if (isset($item['inventoryItemId']) && !str_starts_with($item['inventoryItemId'], 'gid://')) {
+                $item['inventoryItemId'] = "gid://shopify/InventoryItem/{$item['inventoryItemId']}";
+            }
+            if (isset($item['locationId']) && !str_starts_with($item['locationId'], 'gid://')) {
+                $item['locationId'] = "gid://shopify/Location/{$item['locationId']}";
+            }
+        }
+
+        $query = <<<'gql'
+        mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
+          inventorySetOnHandQuantities(input: $input) {
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+        // Ensure we pass the precise structure GraphQL expects
+        $input = [
+            'reason' => 'correction',
+            'setQuantities' => $inventoryData
+        ];
+
+        $response = $this->graphQL($query, ['input' => $input]);
+
+        $errors = $response['data']['inventorySetOnHandQuantities']['userErrors'] ?? [];
+        if (!empty($errors)) {
+            $unstockedIndices = [];
+            foreach ($errors as $error) {
+                if (($error['message'] ?? '') === 'The specified inventory item is not stocked at the location.') {
+                    $field = $error['field'] ?? [];
+                    if (isset($field[2]) && is_numeric($field[2])) {
+                        $unstockedIndices[] = (int) $field[2];
+                    }
+                }
+            }
+
+            // If we found unstocked items, activate them and retry individually
+            if (!empty($unstockedIndices)) {
+                Log::warning("Found " . count($unstockedIndices) . " unstocked inventory items. Activating and retrying them individually.");
+                foreach ($unstockedIndices as $index) {
+                    if (isset($inventoryData[$index])) {
+                        $item = $inventoryData[$index];
+                        // 1. Activate tracking
+                        $this->activateInventoryLocation($item['inventoryItemId'], $item['locationId']);
+                        // 2. Fallback to old REST API for this specific item just once so it's fully set
+                        $this->setInventoryLevel(
+                            str_replace('gid://shopify/InventoryItem/', '', $item['inventoryItemId']),
+                            str_replace('gid://shopify/Location/', '', $item['locationId']),
+                            $item['quantity']
+                        );
+                    }
+                }
+
+                // If there were other errors besides the unstocked ones, log them
+                if (count($errors) > count($unstockedIndices)) {
+                    Log::error("Shopify Bulk Inventory Update Errors (Partial Fallback applied)", ['errors' => $errors]);
+                    return false;
+                }
+                return true;
+            }
+
+            Log::error("Shopify Bulk Inventory Update Errors", ['errors' => $errors]);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Activate tracking for an inventory item at a specific location
+     */
+    public function activateInventoryLocation($inventoryItemId, $locationId)
+    {
+        if (!str_starts_with($inventoryItemId, 'gid://')) {
+            $inventoryItemId = "gid://shopify/InventoryItem/{$inventoryItemId}";
+        }
+        if (!str_starts_with($locationId, 'gid://')) {
+            $locationId = "gid://shopify/Location/{$locationId}";
+        }
+
+        $query = <<<'gql'
+        mutation inventoryActivate($inventoryItemId: ID!, $locationId: ID!) {
+          inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
+            inventoryLevel {
+              id
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+        $response = $this->graphQL($query, [
+            'inventoryItemId' => $inventoryItemId,
+            'locationId' => $locationId
+        ]);
+
+        $errors = $response['data']['inventoryActivate']['userErrors'] ?? [];
+        if (!empty($errors)) {
+            Log::error("Shopify Inventory Activate Error", [
+                'inventoryItemId' => $inventoryItemId,
+                'locationId' => $locationId,
+                'errors' => $errors
+            ]);
+            return false;
+        }
+
+        return true;
+    }
+
     public function setVariantMetafield($variantId, $namespace, $key, $value, $type = 'single_line_text_field')
     {
         $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}/metafields.json";
