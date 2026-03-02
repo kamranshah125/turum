@@ -20,20 +20,14 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            git config --global --add safe.directory /var/www/turum
-
-            cd /var/www
-            if [ ! -d "turum" ]; then
-              git clone https://github.com/kamranshah125/turum.git turum
+            cd /var/www/turum
+            if [ ! -d ".git" ]; then
+              git clone https://github.com/kamranshah125/turum.git .
             else
-              cd turum
-              git reset --hard
               git pull origin main
             fi
 
-            cd /var/www/turum
-
-            export COMPOSER_ALLOW_SUPERUSER=1
+             export COMPOSER_ALLOW_SUPERUSER=1
             composer install --no-dev --optimize-autoloader
 
             php artisan config:cache || true
@@ -41,5 +35,5 @@ jobs:
             php artisan view:cache || true
             php artisan queue:restart || true
 
-            chown -R www-data:www-data /var/www/turum
-            chmod -R 775 storage bootstrap/cache
+
+            
