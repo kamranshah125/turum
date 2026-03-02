@@ -22,18 +22,18 @@ jobs:
           script: |
             cd /var/www/turum
             if [ ! -d ".git" ]; then
-              git clone git@github.com:kamranshah125/turum.git .
+              git clone https://github.com/kamranshah125/turum.git .
             else
               git pull origin main
             fi
 
+             export COMPOSER_ALLOW_SUPERUSER=1
             composer install --no-dev --optimize-autoloader
-            cp .env.example .env || true
-            php artisan key:generate || true
-            php artisan config:cache
-            php artisan route:cache
-            php artisan view:cache
-            php artisan queue:restart
+
+            php artisan config:cache || true
+            php artisan route:cache || true
+            php artisan view:cache || true
+            php artisan queue:restart || true
 
 
             
