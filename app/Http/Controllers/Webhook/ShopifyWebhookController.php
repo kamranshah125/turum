@@ -35,20 +35,16 @@ class ShopifyWebhookController extends Controller
             Log::warning('Bypassing HMAC check for testing.');
         }
 
-        // 2. Dispatch Job
+        // 2. Decode Payload
         $payload = json_decode($data, true);
-
-
-        Log::info('Received Shopify Order Webhook: ' . json_encode($payload, JSON_PRETTY_PRINT));
-        
 
         if (!$payload) {
             return response()->json(['message' => 'Invalid Payload'], 400);
         }
 
-        Log::info('Received Shopify Order Webhook', ['id' => $payload['id'] ?? 'unknown']);
+        $orderId = $payload['id'] ?? 'unknown';
+        Log::info("Webhook Received: Shopify Order #{$orderId}");
 
-        // return;
         // Dispatch to queue
         ProcessShopifyOrder::dispatch($payload);
 

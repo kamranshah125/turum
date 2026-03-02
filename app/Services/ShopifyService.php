@@ -104,7 +104,7 @@ class ShopifyService
 
         $response = $this->getClient()->post($endpoint, [
             'query' => $query,
-            'variables' => $variables,
+            'variables' => empty($variables) ? (object) [] : $variables,
         ]);
 
         return $response->json();

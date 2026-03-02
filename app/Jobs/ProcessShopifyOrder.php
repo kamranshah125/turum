@@ -171,12 +171,13 @@ class ProcessShopifyOrder implements ShouldQueue
             return;
         }
 
-        Log::info("Turum Variant ID: " . json_encode($turumVariants));
+        $variantIds = array_column($turumVariants, 'variant_id');
+        Log::info("Found matching Turum Variants for Order {$orderId}: " . implode(', ', $variantIds));
         // return;
 
         $shippingAddress = $this->payload['shipping_address'] ?? null;
         if ($shippingAddress) {
-            Log::info("Updating Turum Address for Order {$orderId}", ['address' => $shippingAddress]);
+            Log::info("Updating Address in Turum for Order {$orderId}");
             try {
                 // 1. Get Current Address to preserve Billing Company Info
                 $currentAddress = $turumService->getAccountAddress();

@@ -61,8 +61,14 @@ class SyncProducts extends Command
         // Check for common wrapper keys
         $items = $products['products'] ?? $products['data'] ?? $products;
         $activeTurumSkus = [];
+        $totalItems = count($items);
 
-        Log::info('Fetched ' . count($items) . ' products from Turum. Processing updates...');
+        $startTimeReadable = now()->format('d M Y, h:i A');
+        Log::info("--- Turum Product Sync Started at {$startTimeReadable} ---");
+        Log::info("Fetched {$totalItems} products from Turum. Processing updates...");
+
+        $processedCount = 0;
+        $lastLogPercentage = 0;
 
         foreach ($items as $tProduct) {
 
@@ -71,8 +77,16 @@ class SyncProducts extends Command
                 continue;
 
             $activeTurumSkus[] = (string) $sku;
+            $processedCount++;
+            $percentage = ($totalItems > 0) ? round(($processedCount / $totalItems) * 100, 2) : 100;
 
-            $this->info("Processing SKU: $sku");
+            $this->info("Processing SKU: $sku ({$processedCount}/{$totalItems}) - {$percentage}%");
+
+            $currentDecile = floor($percentage / 10) * 10;
+            if ($currentDecile > $lastLogPercentage && $currentDecile <= 100) {
+                Log::info("{$currentDecile}% completed");
+                $lastLogPercentage = $currentDecile;
+            }
 
             // 2. Find in Shopify
             $shopifyProduct = $this->shopifyService->findProductBySku($sku);

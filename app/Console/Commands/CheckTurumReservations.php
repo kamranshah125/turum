@@ -35,7 +35,12 @@ class CheckTurumReservations extends Command
             ->whereNotNull('turum_reservation_id')
             ->get();
 
-        $this->info("Checking " . $orders->count() . " pending reservations...");
+        $totalPending = $orders->count();
+        $this->info("Checking {$totalPending} pending reservations...");
+
+        if ($totalPending > 0) {
+            Log::info("Reservation Sync Started: Checking {$totalPending} pending reservations.");
+        }
 
         foreach ($orders as $order) {
             try {
@@ -49,7 +54,10 @@ class CheckTurumReservations extends Command
                 $status = $data['status'] ?? null;
                 $this->line("Order {$order->id}: Status {$status}");
 
-                // Update status if changed
+                // Only log if the status successfully fetched
+                if ($status !== $order->status) {
+                    Log::info("Shopify Order {$order->shopify_order_id} (Turum Res: {$order->turum_reservation_id}) status changed to: {$status}");
+                }
                 if ($status && $status !== $order->status) {
                     $order->status = $status;
                     $order->save();
@@ -87,8 +95,10 @@ class CheckTurumReservations extends Command
                         $order->status = 'fulfilled';
                         $order->save();
                         $this->info("Order {$order->id} fulfilled in Shopify.");
+                        Log::info("Successfully fulfilled Shopify Order {$order->shopify_order_id} with tracking {$trackingNumber}");
                     } else {
                         $this->error("Failed to fulfill Order {$order->id} in Shopify.");
+                        Log::error("Failed to fulfill Shopify Order {$order->shopify_order_id} despite Turum 'sent' status.");
                     }
                 }
 
@@ -99,6 +109,9 @@ class CheckTurumReservations extends Command
         }
 
         $this->info("Check complete.");
+        if ($totalPending > 0) {
+            Log::info("Reservation Sync Complete.");
+        }
     }
 }
 
