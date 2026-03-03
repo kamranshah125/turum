@@ -68,7 +68,9 @@ class TurumApiService
                 return $response->json();
             }
 
-            Log::error('Turum Get Reservation Failed', ['id' => $reservationId, 'status' => $response->status()]);
+            if (!str_starts_with($reservationId, 'mock-reservation-')) {
+                Log::error('Turum Get Reservation Failed', ['id' => $reservationId, 'status' => $response->status()]);
+            }
             return null; // Handle gracefully
 
         } catch (\Exception $e) {
