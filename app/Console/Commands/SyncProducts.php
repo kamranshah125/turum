@@ -40,6 +40,10 @@ class SyncProducts extends Command
         $this->info('Starting Product Sync...');
         Log::info('--- Turum Product Sync Started ---');
 
+        $this->info("Counting active Turum products on Shopify...");
+        $activeShopifyProductsCount = $this->shopifyService->getActiveTurumProductsCount();
+        $this->info("-> Found {$activeShopifyProductsCount} active Turum products on Shopify.");
+
         // 1. Fetch full product list from Turum
         // Expecting structure: [ { "id": "...", "sku": "...", "variants": [...], "name": "..." }, ... ]
         // Note: Check actual structure from previous logs if possible or assume standard.
@@ -105,10 +109,15 @@ class SyncProducts extends Command
         }
 
         $this->info("Checking for stale products to draft...");
-        $draftedCount = $this->shopifyService->draftStaleProducts($activeTurumSkus);
-        $this->info("Drafted {$draftedCount} stale product(s).");
+        $draftResult = $this->shopifyService->draftStaleProducts($activeTurumSkus);
 
-        Log::info("--- Turum Product Sync Complete --- [Drafted: {$draftedCount} stale products]");
+        $draftedCount = $draftResult['drafted'] ?? 0;
+        $totalChecked = $draftResult['checked'] ?? 0;
+
+        $this->info("-> Verified {$totalChecked} active products from Shopify.");
+        $this->info("-> Drafted {$draftedCount} stale product(s).");
+
+        Log::info("--- Turum Product Sync Complete --- [Verified: {$totalChecked}, Drafted: {$draftedCount} stale products]");
         $this->info('Product Sync Complete.');
     }
 

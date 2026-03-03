@@ -492,16 +492,30 @@ gql;
         return null;
     }
 
+    public function getActiveTurumProductsCount(): int
+    {
+        $query = <<<'gql'
+        query {
+            productsCount(query: "status:active") {
+                count
+            }
+        }
+gql;
+        $result = $this->graphQL($query);
+        return $result['data']['productsCount']['count'] ?? 0;
+    }
+
     public function draftStaleProducts(array $activeSkus)
     {
         $draftedCount = 0;
+        $totalActiveChecked = 0;
         $hasNextPage = true;
         $cursor = null;
 
         while ($hasNextPage) {
             $query = <<<'gql'
             query($cursor: String) {
-              products(first: 250, after: $cursor, query: "vendor:Turum AND status:ACTIVE") {
+              products(first: 250, after: $cursor, query: "status:active") {
                 pageInfo {
                   hasNextPage
                   endCursor
@@ -533,6 +547,11 @@ gql;
             }
 
             $edges = $productsData['edges'] ?? [];
+            $totalActiveChecked += count($edges);
+
+            if (!$cursor) {
+                Log::info("Shopify returned " . count($edges) . " initial active products to check against active SKUs.");
+            }
             foreach ($edges as $edge) {
                 $node = $edge['node'];
                 $productId = $node['legacyResourceId'];
@@ -572,7 +591,10 @@ gql;
             $cursor = $productsData['pageInfo']['endCursor'] ?? null;
         }
 
-        return $draftedCount;
+        return [
+            'drafted' => $draftedCount,
+            'checked' => $totalActiveChecked
+        ];
     }
 
     public function cancelOrder($orderId, $reason = 'inventory_shortage')

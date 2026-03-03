@@ -537,7 +537,10 @@ class ComposerStaticInitc514d8f7b9fc5970bdd94287905ef584
 
     public static $classMap = array (
         'App\\Console\\Commands\\CheckTurumReservations' => __DIR__ . '/../..' . '/app/Console/Commands/CheckTurumReservations.php',
+        'App\\Console\\Commands\\SyncProducts' => __DIR__ . '/../..' . '/app/Console/Commands/SyncProducts.php',
+        'App\\Console\\Commands\\TestStaleProduct' => __DIR__ . '/../..' . '/app/Console/Commands/TestStaleProduct.php',
         'App\\Http\\Controllers\\Controller' => __DIR__ . '/../..' . '/app/Http/Controllers/Controller.php',
+        'App\\Http\\Controllers\\DebugController' => __DIR__ . '/../..' . '/app/Http/Controllers/DebugController.php',
         'App\\Http\\Controllers\\Webhook\\ShopifyWebhookController' => __DIR__ . '/../..' . '/app/Http/Controllers/Webhook/ShopifyWebhookController.php',
         'App\\Jobs\\ProcessShopifyOrder' => __DIR__ . '/../..' . '/app/Jobs/ProcessShopifyOrder.php',
         'App\\Models\\IntegrationOrder' => __DIR__ . '/../..' . '/app/Models/IntegrationOrder.php',

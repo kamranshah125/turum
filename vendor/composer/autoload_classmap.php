@@ -7,7 +7,10 @@ $baseDir = dirname($vendorDir);
 
 return array(
     'App\\Console\\Commands\\CheckTurumReservations' => $baseDir . '/app/Console/Commands/CheckTurumReservations.php',
+    'App\\Console\\Commands\\SyncProducts' => $baseDir . '/app/Console/Commands/SyncProducts.php',
+    'App\\Console\\Commands\\TestStaleProduct' => $baseDir . '/app/Console/Commands/TestStaleProduct.php',
     'App\\Http\\Controllers\\Controller' => $baseDir . '/app/Http/Controllers/Controller.php',
+    'App\\Http\\Controllers\\DebugController' => $baseDir . '/app/Http/Controllers/DebugController.php',
     'App\\Http\\Controllers\\Webhook\\ShopifyWebhookController' => $baseDir . '/app/Http/Controllers/Webhook/ShopifyWebhookController.php',
     'App\\Jobs\\ProcessShopifyOrder' => $baseDir . '/app/Jobs/ProcessShopifyOrder.php',
     'App\\Models\\IntegrationOrder' => $baseDir . '/app/Models/IntegrationOrder.php',
