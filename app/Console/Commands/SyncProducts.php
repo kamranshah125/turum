@@ -101,6 +101,23 @@ class SyncProducts extends Command
                 $allVariants = $this->shopifyService->getProductVariants($shopifyProduct['product_id']);
 
                 $this->info("  [UPDATE] Found existing product in Shopify (ID: {$shopifyProduct['product_id']}). Updating variants...");
+
+                // Smartly extract type and colors for existing products to ensure filters work
+                $smartType = $this->extractProductType($tProduct['name'] ?? '', $tProduct['category'] ?? $tProduct['type'] ?? '');
+                $extractedColors = $this->extractColors($tProduct['name'] ?? '');
+                $tags = empty($extractedColors) ? '' : implode(', ', $extractedColors);
+
+                // Update the product level properties (Brand, Type, Tags, Body)
+                $this->shopifyService->updateProduct($shopifyProduct['product_id'], [
+                    'product' => [
+                        'id' => $shopifyProduct['product_id'],
+                        'vendor' => $tProduct['brand'] ?? 'Turum',
+                        'product_type' => $smartType,
+                        'tags' => $tags,
+                        'body_html' => $tProduct['description'] ?? '',
+                    ]
+                ]);
+
                 $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
             } else {
                 $this->info("  [NEW] Product not found in Shopify. Creating...");
@@ -179,12 +196,22 @@ class SyncProducts extends Command
             $imagesPayload[] = ['src' => $tProduct['image']];
         }
 
+        $smartType = $this->extractProductType($tProduct['name'] ?? '', $tProduct['category'] ?? $tProduct['type'] ?? '');
+        $extractedColors = $this->extractColors($tProduct['name'] ?? '');
+        $tags = empty($extractedColors) ? '' : implode(', ', $extractedColors);
+
         $payload = [
             'product' => [
                 'title' => $tProduct['name'],
                 'body_html' => $tProduct['description'] ?? '', // Full description
                 'vendor' => $tProduct['brand'] ?? 'Turum',
-                'product_type' => $tProduct['category'] ?? $tProduct['type'] ?? 'Shoes', // Dynamic Category
+                'product_type' => $smartType,
+                'tags' => $tags,
+                'options' => [
+                    [
+                        'name' => 'Size'
+                    ]
+                ],
                 'variants' => $variantsPayload,
                 'images' => $imagesPayload
             ]
@@ -310,5 +337,76 @@ class SyncProducts extends Command
                 usleep(300000);
             }
         }
+    }
+
+    protected function extractProductType($name, $fallbackType)
+    {
+        $nameLower = strtolower($name);
+
+        $apparelKeywords = ['t-shirt', 't shirt', 'shirt', 'hoodie', 'jacket', 'pants', 'shorts', 'sweatshirt', 'tracksuit', 'joggers', 'bra', 'leggings', 'jersey'];
+        $accessoriesKeywords = ['bag', 'backpack', 'hat', 'cap', 'socks', 'beanie', 'gloves', 'belt', 'wallet'];
+
+        foreach ($apparelKeywords as $keyword) {
+            if (str_contains($nameLower, $keyword))
+                return 'Apparel';
+        }
+
+        foreach ($accessoriesKeywords as $keyword) {
+            if (str_contains($nameLower, $keyword))
+                return 'Accessories';
+        }
+
+        // If generic type was provided by Turum
+        if (!empty($fallbackType) && strtolower($fallbackType) !== 'other') {
+            return ucfirst($fallbackType);
+        }
+
+        return 'Sneakers'; // Default
+    }
+
+    protected function extractColors($name)
+    {
+        $nameLower = strtolower($name);
+
+        // Comprehensive list of colors
+        $knownColors = [
+            'black',
+            'white',
+            'grey',
+            'gray',
+            'red',
+            'blue',
+            'green',
+            'yellow',
+            'orange',
+            'purple',
+            'pink',
+            'brown',
+            'beige',
+            'navy',
+            'olive',
+            'maroon',
+            'teal',
+            'gold',
+            'silver',
+            'bronze',
+            'cream',
+            'magenta',
+            'cyan',
+            'khaki',
+            'burgundy',
+            'sail',
+            'bone'
+        ];
+
+        $foundColors = [];
+        foreach ($knownColors as $color) {
+            // Check if the color exists as a standalone word (boundary check)
+            if (preg_match('/\b' . $color . '\b/i', $nameLower)) {
+                $foundColors[] = 'Color_' . ucfirst($color);
+            }
+        }
+
+        return $foundColors;
     }
 }
