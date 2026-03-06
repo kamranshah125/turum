@@ -107,8 +107,11 @@ class SyncProducts extends Command
                 $extractedColors = $this->extractColors($tProduct['name'] ?? '');
                 $tags = empty($extractedColors) ? '' : implode(', ', $extractedColors);
 
+                // Determine Category GID based on smart type
+                $categoryGid = $this->getTaxonomyGid($smartType);
+
                 // Update the product level properties (Brand, Type, Tags, Body)
-                $this->shopifyService->updateProduct($shopifyProduct['product_id'], [
+                $productUpdatePayload = [
                     'product' => [
                         'id' => $shopifyProduct['product_id'],
                         'vendor' => $tProduct['brand'] ?? 'Turum',
@@ -116,7 +119,28 @@ class SyncProducts extends Command
                         'tags' => $tags,
                         'body_html' => $tProduct['description'] ?? '',
                     ]
-                ]);
+                ];
+
+                $this->shopifyService->updateProduct($shopifyProduct['product_id'], $productUpdatePayload);
+
+                // Apply Taxonomy Category via GraphQL (crucial for filters)
+                if ($categoryGid) {
+                    $this->shopifyService->updateProductCategory($shopifyProduct['product_id'], $categoryGid);
+                }
+
+                // Add Color Metaobject Reference if found via GraphQL (must happen after Category set)
+                if (!empty($extractedColors)) {
+                    $colorGids = $this->getColorGids($extractedColors);
+                    if (!empty($colorGids)) {
+                        $this->shopifyService->setMetafield(
+                            $shopifyProduct['product_id'],
+                            'shopify',
+                            'color-pattern',
+                            json_encode($colorGids),
+                            'list.metaobject_reference'
+                        );
+                    }
+                }
 
                 $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
             } else {
@@ -200,6 +224,8 @@ class SyncProducts extends Command
         $extractedColors = $this->extractColors($tProduct['name'] ?? '');
         $tags = empty($extractedColors) ? '' : implode(', ', $extractedColors);
 
+        $categoryGid = $this->getTaxonomyGid($smartType);
+
         $payload = [
             'product' => [
                 'title' => $tProduct['name'],
@@ -221,6 +247,26 @@ class SyncProducts extends Command
 
         if ($createdProduct) {
             $this->info("    -> Product created successfully (ID: {$createdProduct['id']})");
+
+            // Categorize via GraphQL to enable standard metafields
+            if ($categoryGid) {
+                $this->shopifyService->updateProductCategory($createdProduct['id'], $categoryGid);
+            }
+
+            // Set Color Metafield via GraphQL after creation and categorization
+            if (!empty($extractedColors)) {
+                $colorGids = $this->getColorGids($extractedColors);
+                if (!empty($colorGids)) {
+                    $this->shopifyService->setMetafield(
+                        $createdProduct['id'],
+                        'shopify',
+                        'color-pattern',
+                        json_encode($colorGids),
+                        'list.metaobject_reference'
+                    );
+                }
+            }
+
             // Use the created variants to map Metafields
             // Match by 'option1' (size)
             $this->syncVariants($createdProduct['id'], $tProduct['variants'], $tProduct['sku'], $createdProduct['variants'], true);
@@ -401,12 +447,92 @@ class SyncProducts extends Command
 
         $foundColors = [];
         foreach ($knownColors as $color) {
-            // Check if the color exists as a standalone word (boundary check)
             if (preg_match('/\b' . $color . '\b/i', $nameLower)) {
-                $foundColors[] = 'Color_' . ucfirst($color);
+                $foundColors[] = ucfirst($color);
             }
         }
 
-        return $foundColors;
+        return $foundColors; // Returns simple color names like ["Black", "White"]
+    }
+
+    protected $colorMapCache = null;
+
+    protected function getColorGids($colorNames)
+    {
+        if ($this->colorMapCache === null) {
+            $this->colorMapCache = [];
+            $this->info("Fetching Color Metaobjects from Shopify for filtering...");
+
+            // Query metaobjects of type shopify--color-pattern
+            // Using raw GraphQL query via shopifyService
+            $query = <<<'gql'
+            {
+              metaobjects(first: 100, type: "shopify--color-pattern") {
+                edges {
+                  node {
+                    id
+                    displayName
+                  }
+                }
+              }
+            }
+            gql;
+
+            // This is a bit of a hack since graphQL is protected in ShopifyService, 
+            // but we can add a public method or use reflection if needed.
+            // Actually, ShopifyService has a protected graphQL, let's assume we can call it.
+            $ref = new \ReflectionClass($this->shopifyService);
+            $method = $ref->getMethod('graphQL');
+            $method->setAccessible(true);
+            $result = $method->invoke($this->shopifyService, $query);
+
+            $edges = $result['data']['metaobjects']['edges'] ?? [];
+            foreach ($edges as $edge) {
+                $node = $edge['node'];
+                $this->colorMapCache[strtolower($node['displayName'])] = $node['id'];
+            }
+
+            // Common English to Dutch/Standard mapping for this store if display names are Dutch
+            $translationMap = [
+                'black' => 'zwart',
+                'white' => 'wit',
+                'red' => 'rood',
+                'blue' => 'blauw',
+                'grey' => 'grijs',
+                'gray' => 'grijs',
+                'green' => 'groen',
+                'pink' => 'roze',
+                'yellow' => 'geel',
+            ];
+
+            foreach ($translationMap as $en => $target) {
+                if (isset($this->colorMapCache[$target]) && !isset($this->colorMapCache[$en])) {
+                    $this->colorMapCache[$en] = $this->colorMapCache[$target];
+                }
+            }
+        }
+
+        $gids = [];
+        foreach ($colorNames as $name) {
+            $nameLower = strtolower($name);
+            if (isset($this->colorMapCache[$nameLower])) {
+                $gids[] = $this->colorMapCache[$nameLower];
+            }
+        }
+
+        return $gids;
+    }
+
+    protected function getTaxonomyGid($type)
+    {
+        // Mapping simple types to Shopify Standard Taxonomy GIDs
+        // Full list: https://help.shopify.com/en/manual/products/details/product-taxonomy
+        $map = [
+            'Sneakers' => 'gid://shopify/TaxonomyCategory/aa-8', // Shoes
+            'Apparel' => 'gid://shopify/TaxonomyCategory/aa-3', // Clothing
+            'Accessories' => 'gid://shopify/TaxonomyCategory/aa-1', // Clothing Accessories
+        ];
+
+        return $map[$type] ?? null;
     }
 }

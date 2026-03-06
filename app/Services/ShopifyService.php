@@ -253,6 +253,42 @@ gql;
         return $response->successful();
     }
 
+    public function updateProductCategory($productId, $categoryGid)
+    {
+        $query = <<<'gql'
+        mutation productUpdate($input: ProductInput!) {
+          productUpdate(input: $input) {
+            product {
+              id
+              category {
+                id
+                name
+              }
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+        $input = [
+            'id' => str_starts_with($productId, 'gid://') ? $productId : "gid://shopify/Product/{$productId}",
+            'category' => $categoryGid
+        ];
+
+        $response = $this->graphQL($query, ['input' => $input]);
+
+        $errors = $response['data']['productUpdate']['userErrors'] ?? [];
+        if (!empty($errors)) {
+            Log::error("Shopify Product Category Update Errors", ['errors' => $errors]);
+            return false;
+        }
+
+        return true;
+    }
+
     public function updateVariant($variantId, $data)
     {
         $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}.json";
@@ -448,27 +484,58 @@ gql;
         return true;
     }
 
-    public function setVariantMetafield($variantId, $namespace, $key, $value, $type = 'single_line_text_field')
+    public function setMetafield(string $ownerId, string $namespace, string $key, string $value, string $type = 'single_line_text_field')
     {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}/metafields.json";
-
-        $payload = [
-            'metafield' => [
+        // GraphQL version is more robust for Standard Metafields
+        return $this->setMetafields([
+            [
+                'ownerId' => str_starts_with($ownerId, 'gid://') ? $ownerId : "gid://shopify/Product/{$ownerId}",
                 'namespace' => $namespace,
                 'key' => $key,
                 'value' => $value,
                 'type' => $type
             ]
-        ];
+        ]);
+    }
 
-        $response = $this->getClient()->post($endpoint, $payload);
+    /**
+     * Set multiple metafields in one GraphQL call.
+     * $metafields = [['ownerId' => '...', 'namespace' => '...', 'key' => '...', 'value' => '...', 'type' => '...'], ...]
+     */
+    public function setMetafields(array $metafields)
+    {
+        $query = <<<'gql'
+        mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields {
+              id
+              key
+              value
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
 
-        if ($response->successful()) {
-            return true;
+        foreach ($metafields as &$m) {
+            if (isset($m['ownerId']) && !str_starts_with($m['ownerId'], 'gid://')) {
+                // Default to Product if not specified
+                $m['ownerId'] = "gid://shopify/Product/{$m['ownerId']}";
+            }
         }
 
-        Log::error("Failed to set Metafield for Variant {$variantId}", ['body' => $response->body()]);
-        return false;
+        $response = $this->graphQL($query, ['metafields' => $metafields]);
+
+        $errors = $response['data']['metafieldsSet']['userErrors'] ?? [];
+        if (!empty($errors)) {
+            Log::error("Shopify Metafields Set Errors", ['errors' => $errors]);
+            return false;
+        }
+
+        return true;
     }
 
     public function getVariantMetafield($variantId, $namespace, $key)
