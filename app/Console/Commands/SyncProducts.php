@@ -128,19 +128,10 @@ class SyncProducts extends Command
                     $this->shopifyService->updateProductCategory($shopifyProduct['product_id'], $categoryGid);
                 }
 
-                // Add Color Metaobject Reference if found via GraphQL (must happen after Category set)
-                if (!empty($extractedColors)) {
-                    $colorGids = $this->getColorGids($extractedColors);
-                    if (!empty($colorGids)) {
-                        $this->shopifyService->setMetafield(
-                            $shopifyProduct['product_id'],
-                            'shopify',
-                            'color-pattern',
-                            json_encode($colorGids),
-                            'list.metaobject_reference'
-                        );
-                    }
-                }
+                // Sync all filters (Color and Size) via GraphQL
+                $this->syncProductFilters($shopifyProduct['product_id'], $tProduct, $smartType);
+
+                $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
 
                 $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
             } else {
@@ -253,19 +244,8 @@ class SyncProducts extends Command
                 $this->shopifyService->updateProductCategory($createdProduct['id'], $categoryGid);
             }
 
-            // Set Color Metafield via GraphQL after creation and categorization
-            if (!empty($extractedColors)) {
-                $colorGids = $this->getColorGids($extractedColors);
-                if (!empty($colorGids)) {
-                    $this->shopifyService->setMetafield(
-                        $createdProduct['id'],
-                        'shopify',
-                        'color-pattern',
-                        json_encode($colorGids),
-                        'list.metaobject_reference'
-                    );
-                }
-            }
+            // Sync all filters (Color and Size) via GraphQL after creation and categorization
+            $this->syncProductFilters($createdProduct['id'], $tProduct, $smartType);
 
             // Use the created variants to map Metafields
             // Match by 'option1' (size)
@@ -389,8 +369,8 @@ class SyncProducts extends Command
     {
         $nameLower = strtolower($name);
 
-        $apparelKeywords = ['t-shirt', 't shirt', 'shirt', 'hoodie', 'jacket', 'pants', 'shorts', 'sweatshirt', 'tracksuit', 'joggers', 'bra', 'leggings', 'jersey'];
-        $accessoriesKeywords = ['bag', 'backpack', 'hat', 'cap', 'socks', 'beanie', 'gloves', 'belt', 'wallet'];
+        $apparelKeywords = ['t-shirt', 't shirt', 'shirt', 'hoodie', 'jacket', 'pants', 'shorts', 'sweatshirt', 'tracksuit', 'joggers', 'bra', 'leggings', 'jersey', 'sweater', 'top', 'vest', 'tank', 'pullover', 'crewneck', 'puffer', 'fleece', 'tights'];
+        $accessoriesKeywords = ['bag', 'backpack', 'hat', 'cap', 'socks', 'beanie', 'gloves', 'belt', 'wallet', 'scarf', 'eyewear', 'sunglasses', 'slippers', 'slides'];
 
         foreach ($apparelKeywords as $keyword) {
             if (str_contains($nameLower, $keyword))
@@ -403,8 +383,17 @@ class SyncProducts extends Command
         }
 
         // If generic type was provided by Turum
-        if (!empty($fallbackType) && strtolower($fallbackType) !== 'other') {
-            return ucfirst($fallbackType);
+        if (!empty($fallbackType)) {
+            $fallbackLower = strtolower($fallbackType);
+            if (str_contains($fallbackLower, 'apparel') || str_contains($fallbackLower, 'clothing') || str_contains($fallbackLower, 'wear')) {
+                return 'Apparel';
+            }
+            if (str_contains($fallbackLower, 'accessory') || str_contains($fallbackLower, 'accessories')) {
+                return 'Accessories';
+            }
+            if (str_contains($fallbackLower, 'shoe') || str_contains($fallbackLower, 'sneaker') || str_contains($fallbackLower, 'footwear')) {
+                return 'Sneakers';
+            }
         }
 
         return 'Sneakers'; // Default
@@ -457,17 +446,59 @@ class SyncProducts extends Command
 
     protected $colorMapCache = null;
 
+    protected $sizeMapCache = null;
+
+    protected function syncProductFilters($productId, $tProduct, $productType)
+    {
+        $metafields = [];
+
+        // 1. COLORS
+        $extractedColors = $this->extractColors($tProduct['name'] ?? '');
+        if (!empty($extractedColors)) {
+            $colorGids = $this->getColorGids($extractedColors);
+            if (!empty($colorGids)) {
+                $metafields[] = [
+                    'ownerId' => $productId,
+                    'namespace' => 'shopify',
+                    'key' => 'color-pattern',
+                    'value' => json_encode($colorGids),
+                    'type' => 'list.metaobject_reference'
+                ];
+            }
+        }
+
+        // 2. SIZES based on product type
+        $sizeGids = $this->getSizeGids($tProduct['variants'] ?? [], $productType);
+        if (!empty($sizeGids)) {
+            $key = 'shoe-size'; // Default
+            if ($productType === 'Apparel')
+                $key = 'size';
+            if ($productType === 'Accessories')
+                $key = 'accessory-size';
+
+            $metafields[] = [
+                'ownerId' => $productId,
+                'namespace' => 'shopify',
+                'key' => $key,
+                'value' => json_encode($sizeGids),
+                'type' => 'list.metaobject_reference'
+            ];
+        }
+
+        if (!empty($metafields)) {
+            $this->shopifyService->setMetafields($metafields);
+        }
+    }
+
     protected function getColorGids($colorNames)
     {
         if ($this->colorMapCache === null) {
             $this->colorMapCache = [];
-            $this->info("Fetching Color Metaobjects from Shopify for filtering...");
+            $this->info("Fetching Color Metaobjects from Shopify...");
 
-            // Query metaobjects of type shopify--color-pattern
-            // Using raw GraphQL query via shopifyService
             $query = <<<'gql'
             {
-              metaobjects(first: 100, type: "shopify--color-pattern") {
+              metaobjects(first: 250, type: "shopify--color-pattern") {
                 edges {
                   node {
                     id
@@ -478,21 +509,13 @@ class SyncProducts extends Command
             }
             gql;
 
-            // This is a bit of a hack since graphQL is protected in ShopifyService, 
-            // but we can add a public method or use reflection if needed.
-            // Actually, ShopifyService has a protected graphQL, let's assume we can call it.
-            $ref = new \ReflectionClass($this->shopifyService);
-            $method = $ref->getMethod('graphQL');
-            $method->setAccessible(true);
-            $result = $method->invoke($this->shopifyService, $query);
-
+            $result = $this->callShopifyGQL($query);
             $edges = $result['data']['metaobjects']['edges'] ?? [];
             foreach ($edges as $edge) {
                 $node = $edge['node'];
                 $this->colorMapCache[strtolower($node['displayName'])] = $node['id'];
             }
 
-            // Common English to Dutch/Standard mapping for this store if display names are Dutch
             $translationMap = [
                 'black' => 'zwart',
                 'white' => 'wit',
@@ -520,7 +543,67 @@ class SyncProducts extends Command
             }
         }
 
-        return $gids;
+        return array_unique($gids);
+    }
+
+    protected function getSizeGids($turumVariants, $productType)
+    {
+        if ($this->sizeMapCache === null) {
+            $this->sizeMapCache = [
+                'Sneakers' => [],
+                'Apparel' => [],
+                'Accessories' => []
+            ];
+
+            $this->info("Fetching Size Metaobjects from Shopify...");
+
+            // Fetch Clothing Sizes
+            $resA = $this->callShopifyGQL('{ metaobjects(first: 250, type: "shopify--size") { edges { node { id displayName } } } }');
+            foreach ($resA['data']['shopifySize']['edges'] ?? $resA['data']['metaobjects']['edges'] ?? [] as $edge) {
+                $this->sizeMapCache['Apparel'][strtolower($edge['node']['displayName'])] = $edge['node']['id'];
+            }
+
+            // Fetch Shoe Sizes
+            $resS = $this->callShopifyGQL('{ metaobjects(first: 250, type: "shopify--shoe-size") { edges { node { id displayName } } } }');
+            foreach ($resS['data']['shoeSize']['edges'] ?? $resS['data']['metaobjects']['edges'] ?? [] as $edge) {
+                $name = str_replace(',', '.', $edge['node']['displayName']);
+                $this->sizeMapCache['Sneakers'][$name] = $edge['node']['id'];
+                $this->sizeMapCache['Sneakers'][$edge['node']['displayName']] = $edge['node']['id'];
+            }
+
+            // Fetch Accessory Sizes
+            $resAcc = $this->callShopifyGQL('{ metaobjects(first: 250, type: "shopify--accessory-size") { edges { node { id displayName } } } }');
+            foreach ($resAcc['data']['accSize']['edges'] ?? $resAcc['data']['metaobjects']['edges'] ?? [] as $edge) {
+                $this->sizeMapCache['Accessories'][strtolower($edge['node']['displayName'])] = $edge['node']['id'];
+            }
+        }
+
+        $gids = [];
+        $typeKey = $productType;
+        if (!isset($this->sizeMapCache[$typeKey]))
+            $typeKey = 'Sneakers';
+
+        foreach ($turumVariants as $v) {
+            $sz = $v['eu_size'] ?? $v['size'] ?? '';
+            $szLower = strtolower($sz);
+            $szClean = str_replace(',', '.', $sz);
+
+            if (isset($this->sizeMapCache[$typeKey][$szLower])) {
+                $gids[] = $this->sizeMapCache[$typeKey][$szLower];
+            } elseif (isset($this->sizeMapCache[$typeKey][$szClean])) {
+                $gids[] = $this->sizeMapCache[$typeKey][$szClean];
+            }
+        }
+
+        return array_unique($gids);
+    }
+
+    protected function callShopifyGQL($query)
+    {
+        $ref = new \ReflectionClass($this->shopifyService);
+        $method = $ref->getMethod('graphQL');
+        $method->setAccessible(true);
+        return $method->invoke($this->shopifyService, $query);
     }
 
     protected function getTaxonomyGid($type)
@@ -529,10 +612,10 @@ class SyncProducts extends Command
         // Full list: https://help.shopify.com/en/manual/products/details/product-taxonomy
         $map = [
             'Sneakers' => 'gid://shopify/TaxonomyCategory/aa-8', // Shoes
-            'Apparel' => 'gid://shopify/TaxonomyCategory/aa-3', // Clothing
-            'Accessories' => 'gid://shopify/TaxonomyCategory/aa-1', // Clothing Accessories
+            'Apparel' => 'gid://shopify/TaxonomyCategory/aa-1', // Clothing
+            'Accessories' => 'gid://shopify/TaxonomyCategory/aa-2', // Clothing Accessories
         ];
 
-        return $map[$type] ?? null;
+        return $map[$type] ?? 'gid://shopify/TaxonomyCategory/aa'; // Fallback to broad Apparel & Accessories
     }
 }
