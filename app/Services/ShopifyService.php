@@ -8,111 +8,173 @@ use Illuminate\Http\Client\PendingRequest;
 
 class ShopifyService
 {
-    protected $domain;
-    protected $token;
-    protected $version = '2026-01'; // Update to latest stable
+  protected $domain;
+  protected $token;
+  protected $version = '2025-01'; // Update to latest stable
 
-    public function __construct()
-    {
-        $this->domain = config('services.shopify.domain'); // e.g., shop-name.myshopify.com
-        $this->token = config('services.shopify.token');
+  protected function formatGid($id, $type)
+  {
+    if (str_starts_with($id, 'gid://')) {
+      return $id;
+    }
+    return "gid://shopify/{$type}/{$id}";
+  }
 
-        // log::info('shopify domain: ' . $this->domain);
-        // Do not log the token in production, but keeping it for debug as requested previously
-        // log::info('shopify token *** set from env ***');
+  protected function unformatGid($gid)
+  {
+    if (!str_starts_with($gid, 'gid://')) {
+      return $gid;
+    }
+    $parts = explode('/', $gid);
+    return end($parts);
+  }
+
+  public function __construct()
+  {
+    $this->domain = config('services.shopify.domain'); // e.g., shop-name.myshopify.com
+    $this->token = config('services.shopify.token');
+
+    // log::info('shopify domain: ' . $this->domain);
+    // Do not log the token in production, but keeping it for debug as requested previously
+    // log::info('shopify token *** set from env ***');
+  }
+
+  /**
+   * Get a configured HTTP client with timeouts and retries for robust fetching.
+   */
+  protected function getClient(): PendingRequest
+  {
+    return Http::withHeaders([
+      'X-Shopify-Access-Token' => $this->token,
+      'Content-Type' => 'application/json'
+    ])
+      ->timeout(60)
+      ->retry(3, 2000, null, false);
+  }
+
+  public function fulfillOrder($shopifyOrderId, $trackingNumber, $trackingUrl, $carrier = 'DPD')
+  {
+    $fulfillmentOrders = $this->getFulfillmentOrders($shopifyOrderId);
+
+    if (empty($fulfillmentOrders)) {
+      Log::error("No fulfillment orders found for Shopify Order {$shopifyOrderId}");
+      return false;
     }
 
-    /**
-     * Get a configured HTTP client with timeouts and retries for robust fetching.
-     */
-    protected function getClient(): PendingRequest
-    {
-        return Http::withHeaders([
-            'X-Shopify-Access-Token' => $this->token,
-            'Content-Type' => 'application/json'
-        ])
-            ->timeout(60)
-            ->retry(3, 2000, null, false);
-    }
+    $fulfillmentOrderId = $fulfillmentOrders[0]['id'];
 
-    public function fulfillOrder($shopifyOrderId, $trackingNumber, $trackingUrl, $carrier = 'DPD')
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/fulfillments.json";
-
-        $fulfillmentOrders = $this->getFulfillmentOrders($shopifyOrderId);
-
-        if (empty($fulfillmentOrders)) {
-            Log::error("No fulfillment orders found for Shopify Order {$shopifyOrderId}");
-            return false;
-        }
-
-        $fulfillmentOrderId = $fulfillmentOrders[0]['id'];
-
-        $fulfillmentPayload = [
-            'fulfillment' => [
-                'line_items_by_fulfillment_order' => [
-                    [
-                        'fulfillment_order_id' => $fulfillmentOrderId,
-                    ]
-                ],
-                'tracking_info' => [
-                    'number' => $trackingNumber,
-                    'url' => $trackingUrl,
-                    'company' => $carrier,
-                ],
-                'notify_customer' => true
-            ]
-        ];
-
-        try {
-            $response = $this->getClient()->post($endpoint, $fulfillmentPayload);
-
-            if ($response->successful()) {
-                Log::info("Order {$shopifyOrderId} fulfilled successfully.");
-                return true;
+    $query = <<<'gql'
+        mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
+          fulfillmentCreateV2(fulfillment: $fulfillment) {
+            fulfillment {
+              id
             }
-
-            Log::error("Shopify Fulfillment Failed for Order {$shopifyOrderId}", ['body' => $response->body()]);
-            return false;
-
-        } catch (\Exception $e) {
-            Log::error("Shopify Service Exception: " . $e->getMessage());
-            throw $e;
-        }
-    }
-
-    protected function getFulfillmentOrders($orderId)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/orders/{$orderId}/fulfillment_orders.json";
-
-        try {
-            $response = $this->getClient()->get($endpoint);
-
-            if ($response->successful()) {
-                return $response->json()['fulfillment_orders'] ?? [];
+            userErrors {
+              field
+              message
             }
-            return [];
-        } catch (\Exception $e) {
-            Log::error("Failed to get fulfillment orders: " . $e->getMessage());
-            return [];
+          }
         }
+        gql;
+
+    // In GraphQL fulfillmentCreateV2, we need the line items from the fulfillment order
+    // For simplicity and since we usually fulfill everything, we'll fetch them.
+    $foQuery = <<<'gql'
+        query($id: ID!) {
+          fulfillmentOrder(id: $id) {
+            lineItems(first: 250) {
+              edges {
+                node {
+                  id
+                  totalQuantity
+                }
+              }
+            }
+          }
+        }
+        gql;
+
+    $foRes = $this->graphQL($foQuery, ['id' => $fulfillmentOrderId]);
+    $lineItems = $foRes['data']['fulfillmentOrder']['lineItems']['edges'] ?? [];
+
+    $payloadLineItems = array_map(function ($edge) {
+      return [
+        'fulfillmentOrderLineItemId' => $edge['node']['id'],
+        'quantity' => $edge['node']['totalQuantity']
+      ];
+    }, $lineItems);
+
+    $variables = [
+      'fulfillment' => [
+        'lineItemsByFulfillmentOrder' => [
+          [
+            'fulfillmentOrderId' => $fulfillmentOrderId,
+            'fulfillmentOrderLineItems' => $payloadLineItems
+          ]
+        ],
+        'trackingInfo' => [
+          'number' => $trackingNumber,
+          'url' => $trackingUrl,
+          'company' => $carrier,
+        ],
+        'notifyCustomer' => true
+      ]
+    ];
+
+    $response = $this->graphQL($query, $variables);
+
+    $errors = $response['data']['fulfillmentCreateV2']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Fulfillment Failed for Order {$shopifyOrderId}", ['errors' => $errors]);
+      return false;
     }
 
-    protected function graphQL($query, $variables = [])
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/graphql.json";
+    return true;
+  }
 
-        $response = $this->getClient()->post($endpoint, [
-            'query' => $query,
-            'variables' => empty($variables) ? (object) [] : $variables,
-        ]);
+  protected function getFulfillmentOrders($orderId)
+  {
+    $query = <<<'gql'
+        query($id: ID!) {
+          order(id: $id) {
+            fulfillmentOrders(first: 10) {
+              edges {
+                node {
+                  id
+                  status
+                }
+              }
+            }
+          }
+        }
+        gql;
 
-        return $response->json();
-    }
+    $response = $this->graphQL($query, ['id' => $this->formatGid($orderId, 'Order')]);
+    $edges = $response['data']['order']['fulfillmentOrders']['edges'] ?? [];
 
-    public function findProductBySku($sku)
-    {
-        $query = <<<'gql'
+    return array_map(function ($edge) {
+      return [
+        'id' => $edge['node']['id'],
+        'status' => $edge['node']['status']
+      ];
+    }, $edges);
+  }
+
+  protected function graphQL($query, $variables = [])
+  {
+    $endpoint = "https://{$this->domain}/admin/api/{$this->version}/graphql.json";
+
+    $response = $this->getClient()->post($endpoint, [
+      'query' => $query,
+      'variables' => empty($variables) ? (object) [] : $variables,
+    ]);
+
+    return $response->json();
+  }
+
+  public function findProductBySku($sku)
+  {
+    $query = <<<'gql'
         query($sku: String!) {
           productVariants(first: 1, query: $sku) {
             edges {
@@ -133,129 +195,274 @@ class ShopifyService
           }
         }
 gql;
-        $result = $this->graphQL($query, ['sku' => "sku:$sku"]);
+    $result = $this->graphQL($query, ['sku' => "sku:$sku"]);
 
-        $edges = $result['data']['productVariants']['edges'] ?? [];
+    $edges = $result['data']['productVariants']['edges'] ?? [];
 
-        if (!empty($edges)) {
-            $node = $edges[0]['node'];
-            if ($node['sku'] === $sku) {
-                return [
-                    'product_id' => $node['product']['legacyResourceId'],
-                    'variant_id' => str_replace('gid://shopify/ProductVariant/', '', $node['id']),
-                    'inventory_item_id' => str_replace('gid://shopify/InventoryItem/', '', $node['inventoryItem']['id'] ?? ''),
-                    'title' => $node['product']['title']
-                ];
-            }
-        }
-        return null;
+    if (!empty($edges)) {
+      $node = $edges[0]['node'];
+      if ($node['sku'] === $sku) {
+        return [
+          'product_id' => $node['product']['legacyResourceId'],
+          'variant_id' => str_replace('gid://shopify/ProductVariant/', '', $node['id']),
+          'inventory_item_id' => str_replace('gid://shopify/InventoryItem/', '', $node['inventoryItem']['id'] ?? ''),
+          'title' => $node['product']['title']
+        ];
+      }
     }
+    return null;
+  }
 
-    public function getProductVariants($productId)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/products/{$productId}/variants.json";
-
-        $response = $this->getClient()->get($endpoint);
-
-        if ($response->successful()) {
-            return $response->json()['variants'] ?? [];
-        }
-
-        Log::error("Failed to fetch variants for Product {$productId}");
-        return [];
-    }
-
-    protected $primaryLocationId = null;
-
-    public function getPrimaryLocationId()
-    {
-        if ($this->primaryLocationId) {
-            return $this->primaryLocationId;
-        }
-
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/locations.json";
-        $response = $this->getClient()->get($endpoint);
-
-        if ($response->successful()) {
-            $locations = $response->json()['locations'] ?? [];
-            foreach ($locations as $loc) {
-                if ($loc['active'] && $loc['legacy'] === false) {
-                    $this->primaryLocationId = $loc['id'];
-                    return $this->primaryLocationId;
+  public function getProductVariants($productId)
+  {
+    $query = <<<'gql'
+        query($id: ID!) {
+          product(id: $id) {
+            variants(first: 250) {
+              edges {
+                node {
+                  id
+                  legacyResourceId
+                  title
+                  sku
+                  price
+                  inventoryItem {
+                    id
+                  }
                 }
+              }
             }
-            if (!empty($locations)) {
-                $this->primaryLocationId = $locations[0]['id'];
-                return $this->primaryLocationId;
-            }
+          }
         }
-        return null;
+        gql;
+
+    $response = $this->graphQL($query, ['id' => $this->formatGid($productId, 'Product')]);
+    $edges = $response['data']['product']['variants']['edges'] ?? [];
+
+    return array_map(function ($edge) {
+      $node = $edge['node'];
+      return [
+        'id' => $node['legacyResourceId'],
+        'product_id' => $this->unformatGid($node['id']), // This is a bit weird in REST, but usually not needed
+        'title' => $node['title'],
+        'sku' => $node['sku'],
+        'price' => $node['price'],
+        'inventory_item_id' => $this->unformatGid($node['inventoryItem']['id'] ?? '')
+      ];
+    }, $edges);
+  }
+
+  protected $primaryLocationId = null;
+
+  public function getPrimaryLocationId()
+  {
+    if ($this->primaryLocationId) {
+      return $this->primaryLocationId;
     }
 
-    public function setInventoryLevel($inventoryItemId, $locationId, $quantity)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/inventory_levels/set.json";
-
-        $response = $this->getClient()->post($endpoint, [
-            'location_id' => $locationId,
-            'inventory_item_id' => $inventoryItemId,
-            'available' => $quantity
-        ]);
-
-        if ($response->successful()) {
-            return true;
+    $query = <<<'gql'
+        {
+          locations(first: 10) {
+            edges {
+              node {
+                id
+                legacyResourceId
+                isActive
+              }
+            }
+          }
         }
+        gql;
 
-        Log::error("Failed to set inventory level for Item {$inventoryItemId}", ['body' => $response->body()]);
-        return false;
+    $response = $this->graphQL($query);
+    $edges = $response['data']['locations']['edges'] ?? [];
+
+    foreach ($edges as $edge) {
+      if ($edge['node']['isActive']) {
+        $this->primaryLocationId = $edge['node']['legacyResourceId'];
+        return $this->primaryLocationId;
+      }
     }
 
-    public function createProduct($data)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/products.json";
+    if (!empty($edges)) {
+      $this->primaryLocationId = $edges[0]['node']['legacyResourceId'];
+      return $this->primaryLocationId;
+    }
 
-        $response = $this->getClient()->post($endpoint, $data);
+    return null;
+  }
 
-        if ($response->successful()) {
-            return $response->json()['product'] ?? null;
+  public function setInventoryLevel($inventoryItemId, $locationId, $quantity)
+  {
+    // Use the existing bulk method but for a single item for consistency
+    return $this->bulkUpdateInventoryLevels([
+      [
+        'inventoryItemId' => $this->formatGid($inventoryItemId, 'InventoryItem'),
+        'locationId' => $this->formatGid($locationId, 'Location'),
+        'quantity' => (int) $quantity
+      ]
+    ]);
+  }
+
+  public function createProduct($data)
+  {
+    $input = [
+      'title' => $data['product']['title'] ?? '',
+      'bodyHtml' => $data['product']['body_html'] ?? '',
+      'vendor' => $data['product']['vendor'] ?? '',
+      'productType' => $data['product']['product_type'] ?? '',
+      'tags' => array_map('trim', explode(',', $data['product']['tags'] ?? '')),
+      'status' => strtoupper($data['product']['status'] ?? 'ACTIVE'),
+    ];
+
+    // Map Options
+    if (!empty($data['product']['options'])) {
+      $input['productOptions'] = array_map(function ($opt) {
+        return ['name' => $opt['name']];
+      }, $data['product']['options']);
+    }
+
+    // Map Variants
+    if (!empty($data['product']['variants'])) {
+      $input['variants'] = array_map(function ($v) {
+        $variantInput = [
+          'price' => $v['price'] ?? 0,
+          'sku' => $v['sku'] ?? '',
+          'inventoryItem' => [
+            'tracked' => ($v['inventory_management'] ?? '') === 'shopify'
+          ]
+        ];
+        // Map options (legacy option1, option2...)
+        $opts = [];
+        if (isset($v['option1']))
+          $opts[] = $v['option1'];
+        if (isset($v['option2']))
+          $opts[] = $v['option2'];
+        if (isset($v['option3']))
+          $opts[] = $v['option3'];
+
+        if (!empty($opts)) {
+          $variantInput['options'] = $opts;
         }
 
-        // Retry without images if we hit an invalid image URL error
-        if ($response->status() === 422) {
-            $responseBody = $response->json() ?? [];
-            $errorString = json_encode($responseBody['errors'] ?? []);
+        // If quantity is provided, we can use inventoryQuantities if supported by the API version
+        // but usually it's safer to handle inventory via bulkUpdateInventoryLevels later if needed.
+        // However, for creation, we can try to set it.
+        return $variantInput;
+      }, $data['product']['variants']);
+    }
 
-            if (str_contains($errorString, 'Image URL is invalid') && !empty($data['product']['images'])) {
-                Log::warning("Creating product failed due to invalid image URL. Retrying without images.", ['title' => $data['product']['title'] ?? '']);
+    // Map Images
+    if (!empty($data['product']['images'])) {
+      $input['media'] = array_map(function ($img) {
+        return [
+          'mediaContentType' => 'IMAGE',
+          'alt' => '',
+          'originalSource' => $img['src']
+        ];
+      }, $data['product']['images']);
+    }
 
-                unset($data['product']['images']);
-                $response2 = $this->getClient()->post($endpoint, $data);
-
-                if ($response2->successful()) {
-                    return $response2->json()['product'] ?? null;
+    $query = <<<'gql'
+        mutation productCreate($input: ProductInput!) {
+          productCreate(input: $input) {
+            product {
+              id
+              legacyResourceId
+              variants(first: 100) {
+                edges {
+                  node {
+                    id
+                    legacyResourceId
+                    title
+                  }
                 }
-
-                Log::error("Failed to create Shopify product even without images", ['body' => $response2->body()]);
-                return null;
+              }
             }
+            userErrors {
+              field
+              message
+            }
+          }
         }
+        gql;
 
-        Log::error("Failed to create Shopify product", ['body' => $response->body()]);
-        return null;
+    $response = $this->graphQL($query, ['input' => $input]);
+
+    $errors = $response['data']['productCreate']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Product Create Errors", ['errors' => $errors, 'input' => $input]);
+      return null;
     }
 
-    public function updateProduct($productId, $data)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/products/{$productId}.json";
-
-        $response = $this->getClient()->put($endpoint, $data);
-
-        return $response->successful();
+    $product = $response['data']['productCreate']['product'] ?? null;
+    if ($product) {
+      // Return in a format compatible with the rest of the app (legacy IDs)
+      $formatted = [
+        'id' => $product['legacyResourceId'],
+        'variants' => array_map(function ($edge) {
+          return [
+            'id' => $edge['node']['legacyResourceId'],
+            'title' => $edge['node']['title']
+          ];
+        }, $product['variants']['edges'] ?? [])
+      ];
+      return $formatted;
     }
 
-    public function updateProductCategory($productId, $categoryGid)
-    {
-        $query = <<<'gql'
+    return null;
+  }
+
+  public function updateProduct($productId, $data)
+  {
+    $payload = $data['product'] ?? $data;
+    $input = [
+      'id' => $this->formatGid($productId, 'Product')
+    ];
+
+    if (isset($payload['title']))
+      $input['title'] = $payload['title'];
+    if (isset($payload['body_html']))
+      $input['bodyHtml'] = $payload['body_html'];
+    if (isset($payload['vendor']))
+      $input['vendor'] = $payload['vendor'];
+    if (isset($payload['product_type']))
+      $input['productType'] = $payload['product_type'];
+    if (isset($payload['status']))
+      $input['status'] = strtoupper($payload['status']);
+
+    if (isset($payload['tags'])) {
+      $input['tags'] = array_map('trim', explode(',', $payload['tags']));
+    }
+
+    $query = <<<'gql'
+        mutation productUpdate($input: ProductInput!) {
+          productUpdate(input: $input) {
+            product {
+              id
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+    $response = $this->graphQL($query, ['input' => $input]);
+
+    $errors = $response['data']['productUpdate']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Product Update Errors", ['errors' => $errors, 'id' => $productId]);
+      return false;
+    }
+
+    return true;
+  }
+
+  public function updateProductCategory($productId, $categoryGid)
+  {
+    $query = <<<'gql'
         mutation productUpdate($input: ProductInput!) {
           productUpdate(input: $input) {
             product {
@@ -273,58 +480,58 @@ gql;
         }
         gql;
 
-        $input = [
-            'id' => str_starts_with($productId, 'gid://') ? $productId : "gid://shopify/Product/{$productId}",
-            'category' => $categoryGid
-        ];
+    $input = [
+      'id' => str_starts_with($productId, 'gid://') ? $productId : "gid://shopify/Product/{$productId}",
+      'category' => $categoryGid
+    ];
 
-        $response = $this->graphQL($query, ['input' => $input]);
+    $response = $this->graphQL($query, ['input' => $input]);
 
-        $errors = $response['data']['productUpdate']['userErrors'] ?? [];
-        if (!empty($errors)) {
-            Log::error("Shopify Product Category Update Errors", ['errors' => $errors]);
-            return false;
-        }
-
-        return true;
+    $errors = $response['data']['productUpdate']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Product Category Update Errors", ['errors' => $errors]);
+      return false;
     }
 
-    public function updateVariant($variantId, $data)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}.json";
+    return true;
+  }
 
-        $response = $this->getClient()->put($endpoint, ['variant' => $data]);
+  public function updateVariant($variantId, $data)
+  {
+    $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}.json";
 
-        return $response->successful();
+    $response = $this->getClient()->put($endpoint, ['variant' => $data]);
+
+    return $response->successful();
+  }
+
+  /**
+   * Update multiple variants for a single product in one GraphQL request.
+   * $variants mapping example:
+   * [
+   *   [
+   *     'id' => 'gid://shopify/ProductVariant/123456',
+   *     'price' => '10.99',
+   *     'inventoryQuantities' => [
+   *         ['availableQuantity' => 5, 'locationId' => 'gid://shopify/Location/98765']
+   *     ]
+   *   ], ...
+   * ]
+   */
+  public function bulkUpdateVariants($productId, array $variants)
+  {
+    // GraphQL requires fully qualified GIDs
+    if (!str_starts_with($productId, 'gid://')) {
+      $productId = "gid://shopify/Product/{$productId}";
     }
 
-    /**
-     * Update multiple variants for a single product in one GraphQL request.
-     * $variants mapping example:
-     * [
-     *   [
-     *     'id' => 'gid://shopify/ProductVariant/123456',
-     *     'price' => '10.99',
-     *     'inventoryQuantities' => [
-     *         ['availableQuantity' => 5, 'locationId' => 'gid://shopify/Location/98765']
-     *     ]
-     *   ], ...
-     * ]
-     */
-    public function bulkUpdateVariants($productId, array $variants)
-    {
-        // GraphQL requires fully qualified GIDs
-        if (!str_starts_with($productId, 'gid://')) {
-            $productId = "gid://shopify/Product/{$productId}";
-        }
+    foreach ($variants as &$v) {
+      if (isset($v['id']) && !str_starts_with($v['id'], 'gid://')) {
+        $v['id'] = "gid://shopify/ProductVariant/{$v['id']}";
+      }
+    }
 
-        foreach ($variants as &$v) {
-            if (isset($v['id']) && !str_starts_with($v['id'], 'gid://')) {
-                $v['id'] = "gid://shopify/ProductVariant/{$v['id']}";
-            }
-        }
-
-        $query = <<<'gql'
+    $query = <<<'gql'
         mutation productVariantsBulkUpdate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
           productVariantsBulkUpdate(productId: $productId, variants: $variants) {
             product {
@@ -343,41 +550,41 @@ gql;
         }
         gql;
 
-        $response = $this->graphQL($query, [
-            'productId' => $productId,
-            'variants' => $variants
-        ]);
+    $response = $this->graphQL($query, [
+      'productId' => $productId,
+      'variants' => $variants
+    ]);
 
-        $errors = $response['data']['productVariantsBulkUpdate']['userErrors'] ?? [];
-        if (!empty($errors)) {
-            Log::error("Shopify Bulk Variant Update Errors", ['errors' => $errors]);
-            return false;
-        }
-
-        return true;
+    $errors = $response['data']['productVariantsBulkUpdate']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Bulk Variant Update Errors", ['errors' => $errors]);
+      return false;
     }
 
-    /**
-     * Update inventory quantities for multiple variants in one GraphQL request.
-     * $inventoryData format:
-     * [
-     *    ['inventoryItemId' => 'gid://shopify/InventoryItem/123', 'locationId' => 'gid://shopify/Location/456', 'quantity' => 10],
-     *    ...
-     * ]
-     */
-    public function bulkUpdateInventoryLevels(array $inventoryData)
-    {
-        // GraphQL requires fully qualified GIDs
-        foreach ($inventoryData as &$item) {
-            if (isset($item['inventoryItemId']) && !str_starts_with($item['inventoryItemId'], 'gid://')) {
-                $item['inventoryItemId'] = "gid://shopify/InventoryItem/{$item['inventoryItemId']}";
-            }
-            if (isset($item['locationId']) && !str_starts_with($item['locationId'], 'gid://')) {
-                $item['locationId'] = "gid://shopify/Location/{$item['locationId']}";
-            }
-        }
+    return true;
+  }
 
-        $query = <<<'gql'
+  /**
+   * Update inventory quantities for multiple variants in one GraphQL request.
+   * $inventoryData format:
+   * [
+   *    ['inventoryItemId' => 'gid://shopify/InventoryItem/123', 'locationId' => 'gid://shopify/Location/456', 'quantity' => 10],
+   *    ...
+   * ]
+   */
+  public function bulkUpdateInventoryLevels(array $inventoryData)
+  {
+    // GraphQL requires fully qualified GIDs
+    foreach ($inventoryData as &$item) {
+      if (isset($item['inventoryItemId']) && !str_starts_with($item['inventoryItemId'], 'gid://')) {
+        $item['inventoryItemId'] = "gid://shopify/InventoryItem/{$item['inventoryItemId']}";
+      }
+      if (isset($item['locationId']) && !str_starts_with($item['locationId'], 'gid://')) {
+        $item['locationId'] = "gid://shopify/Location/{$item['locationId']}";
+      }
+    }
+
+    $query = <<<'gql'
         mutation inventorySetOnHandQuantities($input: InventorySetOnHandQuantitiesInput!) {
           inventorySetOnHandQuantities(input: $input) {
             userErrors {
@@ -388,71 +595,71 @@ gql;
         }
         gql;
 
-        // Ensure we pass the precise structure GraphQL expects
-        $input = [
-            'reason' => 'correction',
-            'setQuantities' => $inventoryData
-        ];
+    // Ensure we pass the precise structure GraphQL expects
+    $input = [
+      'reason' => 'correction',
+      'setQuantities' => $inventoryData
+    ];
 
-        $response = $this->graphQL($query, ['input' => $input]);
+    $response = $this->graphQL($query, ['input' => $input]);
 
-        $errors = $response['data']['inventorySetOnHandQuantities']['userErrors'] ?? [];
-        if (!empty($errors)) {
-            $unstockedIndices = [];
-            foreach ($errors as $error) {
-                if (($error['message'] ?? '') === 'The specified inventory item is not stocked at the location.') {
-                    $field = $error['field'] ?? [];
-                    if (isset($field[2]) && is_numeric($field[2])) {
-                        $unstockedIndices[] = (int) $field[2];
-                    }
-                }
-            }
+    $errors = $response['data']['inventorySetOnHandQuantities']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      $unstockedIndices = [];
+      foreach ($errors as $error) {
+        if (($error['message'] ?? '') === 'The specified inventory item is not stocked at the location.') {
+          $field = $error['field'] ?? [];
+          if (isset($field[2]) && is_numeric($field[2])) {
+            $unstockedIndices[] = (int) $field[2];
+          }
+        }
+      }
 
-            // If we found unstocked items, activate them and retry individually
-            if (!empty($unstockedIndices)) {
-                Log::warning("Found " . count($unstockedIndices) . " unstocked inventory items. Activating and retrying them individually.");
-                foreach ($unstockedIndices as $index) {
-                    if (isset($inventoryData[$index])) {
-                        $item = $inventoryData[$index];
-                        // 1. Activate tracking
-                        $this->activateInventoryLocation($item['inventoryItemId'], $item['locationId']);
-                        // 2. Fallback to old REST API for this specific item just once so it's fully set
-                        $this->setInventoryLevel(
-                            str_replace('gid://shopify/InventoryItem/', '', $item['inventoryItemId']),
-                            str_replace('gid://shopify/Location/', '', $item['locationId']),
-                            $item['quantity']
-                        );
-                    }
-                }
-
-                // If there were other errors besides the unstocked ones, log them
-                if (count($errors) > count($unstockedIndices)) {
-                    Log::error("Shopify Bulk Inventory Update Errors (Partial Fallback applied)", ['errors' => $errors]);
-                    return false;
-                }
-                return true;
-            }
-
-            Log::error("Shopify Bulk Inventory Update Errors", ['errors' => $errors]);
-            return false;
+      // If we found unstocked items, activate them and retry individually
+      if (!empty($unstockedIndices)) {
+        Log::warning("Found " . count($unstockedIndices) . " unstocked inventory items. Activating and retrying them individually.");
+        foreach ($unstockedIndices as $index) {
+          if (isset($inventoryData[$index])) {
+            $item = $inventoryData[$index];
+            // 1. Activate tracking
+            $this->activateInventoryLocation($item['inventoryItemId'], $item['locationId']);
+            // 2. Fallback to old REST API for this specific item just once so it's fully set
+            $this->setInventoryLevel(
+              str_replace('gid://shopify/InventoryItem/', '', $item['inventoryItemId']),
+              str_replace('gid://shopify/Location/', '', $item['locationId']),
+              $item['quantity']
+            );
+          }
         }
 
+        // If there were other errors besides the unstocked ones, log them
+        if (count($errors) > count($unstockedIndices)) {
+          Log::error("Shopify Bulk Inventory Update Errors (Partial Fallback applied)", ['errors' => $errors]);
+          return false;
+        }
         return true;
+      }
+
+      Log::error("Shopify Bulk Inventory Update Errors", ['errors' => $errors]);
+      return false;
     }
 
-    /**
-     * Activate tracking for an inventory item at a specific location
-     */
-    public function activateInventoryLocation($inventoryItemId, $locationId)
-    {
-        if (!str_starts_with($inventoryItemId, 'gid://')) {
-            $inventoryItemId = "gid://shopify/InventoryItem/{$inventoryItemId}";
-        }
-        if (!str_starts_with($locationId, 'gid://')) {
-            $locationId = "gid://shopify/Location/{$locationId}";
-        }
+    return true;
+  }
 
-        $query = <<<'gql'
+  /**
+   * Activate tracking for an inventory item at a specific location
+   */
+  public function activateInventoryLocation($inventoryItemId, $locationId)
+  {
+    if (!str_starts_with($inventoryItemId, 'gid://')) {
+      $inventoryItemId = "gid://shopify/InventoryItem/{$inventoryItemId}";
+    }
+    if (!str_starts_with($locationId, 'gid://')) {
+      $locationId = "gid://shopify/Location/{$locationId}";
+    }
+
+    $query = <<<'gql'
         mutation inventoryActivate($inventoryItemId: ID!, $locationId: ID!) {
           inventoryActivate(inventoryItemId: $inventoryItemId, locationId: $locationId) {
             inventoryLevel {
@@ -466,45 +673,45 @@ gql;
         }
         gql;
 
-        $response = $this->graphQL($query, [
-            'inventoryItemId' => $inventoryItemId,
-            'locationId' => $locationId
-        ]);
+    $response = $this->graphQL($query, [
+      'inventoryItemId' => $inventoryItemId,
+      'locationId' => $locationId
+    ]);
 
-        $errors = $response['data']['inventoryActivate']['userErrors'] ?? [];
-        if (!empty($errors)) {
-            Log::error("Shopify Inventory Activate Error", [
-                'inventoryItemId' => $inventoryItemId,
-                'locationId' => $locationId,
-                'errors' => $errors
-            ]);
-            return false;
-        }
-
-        return true;
+    $errors = $response['data']['inventoryActivate']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Inventory Activate Error", [
+        'inventoryItemId' => $inventoryItemId,
+        'locationId' => $locationId,
+        'errors' => $errors
+      ]);
+      return false;
     }
 
-    public function setMetafield(string $ownerId, string $namespace, string $key, string $value, string $type = 'single_line_text_field')
-    {
-        // GraphQL version is more robust for Standard Metafields
-        return $this->setMetafields([
-            [
-                'ownerId' => str_starts_with($ownerId, 'gid://') ? $ownerId : "gid://shopify/Product/{$ownerId}",
-                'namespace' => $namespace,
-                'key' => $key,
-                'value' => $value,
-                'type' => $type
-            ]
-        ]);
-    }
+    return true;
+  }
 
-    /**
-     * Set multiple metafields in one GraphQL call.
-     * $metafields = [['ownerId' => '...', 'namespace' => '...', 'key' => '...', 'value' => '...', 'type' => '...'], ...]
-     */
-    public function setMetafields(array $metafields)
-    {
-        $query = <<<'gql'
+  public function setMetafield(string $ownerId, string $namespace, string $key, string $value, string $type = 'single_line_text_field')
+  {
+    // GraphQL version is more robust for Standard Metafields
+    return $this->setMetafields([
+      [
+        'ownerId' => str_starts_with($ownerId, 'gid://') ? $ownerId : "gid://shopify/Product/{$ownerId}",
+        'namespace' => $namespace,
+        'key' => $key,
+        'value' => $value,
+        'type' => $type
+      ]
+    ]);
+  }
+
+  /**
+   * Set multiple metafields in one GraphQL call.
+   * $metafields = [['ownerId' => '...', 'namespace' => '...', 'key' => '...', 'value' => '...', 'type' => '...'], ...]
+   */
+  public function setMetafields(array $metafields)
+  {
+    $query = <<<'gql'
         mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
           metafieldsSet(metafields: $metafields) {
             metafields {
@@ -520,67 +727,67 @@ gql;
         }
         gql;
 
-        foreach ($metafields as &$m) {
-            if (isset($m['ownerId']) && !str_starts_with($m['ownerId'], 'gid://')) {
-                // Default to Product if not specified
-                $m['ownerId'] = "gid://shopify/Product/{$m['ownerId']}";
-            }
-        }
-
-        $response = $this->graphQL($query, ['metafields' => $metafields]);
-
-        $errors = $response['data']['metafieldsSet']['userErrors'] ?? [];
-        if (!empty($errors)) {
-            Log::error("Shopify Metafields Set Errors", ['errors' => $errors]);
-            return false;
-        }
-
-        return true;
+    foreach ($metafields as &$m) {
+      if (isset($m['ownerId']) && !str_starts_with($m['ownerId'], 'gid://')) {
+        // Default to Product if not specified
+        $m['ownerId'] = "gid://shopify/Product/{$m['ownerId']}";
+      }
     }
 
-    public function getVariantMetafield($variantId, $namespace, $key)
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/variants/{$variantId}/metafields.json";
+    $response = $this->graphQL($query, ['metafields' => $metafields]);
 
-        $response = $this->getClient()->get($endpoint, [
-            'namespace' => $namespace,
-            'key' => $key
-        ]);
-
-        if ($response->successful()) {
-            $metafields = $response->json()['metafields'] ?? [];
-            foreach ($metafields as $mf) {
-                if ($mf['namespace'] === $namespace && $mf['key'] === $key) {
-                    return $mf['value'];
-                }
-            }
-        }
-
-        return null;
+    $errors = $response['data']['metafieldsSet']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Shopify Metafields Set Errors", ['errors' => $errors]);
+      return false;
     }
 
-    public function getActiveTurumProductsCount(): int
-    {
-        $query = <<<'gql'
+    return true;
+  }
+
+  public function getVariantMetafield($variantId, $namespace, $key)
+  {
+    $query = <<<'gql'
+        query($id: ID!, $ns: String!, $key: String!) {
+          productVariant(id: $id) {
+            metafield(namespace: $ns, key: $key) {
+                value
+            }
+          }
+        }
+        gql;
+
+    $response = $this->graphQL($query, [
+      'id' => $this->formatGid($variantId, 'ProductVariant'),
+      'ns' => $namespace,
+      'key' => $key
+    ]);
+
+    return $response['data']['productVariant']['metafield']['value'] ?? null;
+  }
+
+  public function getActiveTurumProductsCount(): int
+  {
+    $query = <<<'gql'
         query {
             productsCount(query: "status:active") {
                 count
             }
         }
 gql;
-        $result = $this->graphQL($query);
-        return $result['data']['productsCount']['count'] ?? 0;
-    }
+    $result = $this->graphQL($query);
+    return $result['data']['productsCount']['count'] ?? 0;
+  }
 
-    public function draftStaleProducts(array $activeSkus)
-    {
-        $draftedCount = 0;
-        $totalActiveChecked = 0;
-        $hasNextPage = true;
-        $cursor = null;
+  public function draftStaleProducts(array $activeSkus)
+  {
+    $draftedCount = 0;
+    $totalActiveChecked = 0;
+    $hasNextPage = true;
+    $cursor = null;
 
-        while ($hasNextPage) {
-            $query = <<<'gql'
+    while ($hasNextPage) {
+      $query = <<<'gql'
             query($cursor: String) {
               products(first: 250, after: $cursor, query: "status:active") {
                 pageInfo {
@@ -604,81 +811,127 @@ gql;
             }
 gql;
 
-            $variables = $cursor ? ['cursor' => $cursor] : [];
-            $result = $this->graphQL($query, $variables);
+      $variables = $cursor ? ['cursor' => $cursor] : [];
+      $result = $this->graphQL($query, $variables);
 
-            $productsData = $result['data']['products'] ?? null;
-            if (!$productsData) {
-                Log::error('Failed to fetch Shopify products for drafting.', ['result' => $result]);
-                break;
-            }
+      $productsData = $result['data']['products'] ?? null;
+      if (!$productsData) {
+        Log::error('Failed to fetch Shopify products for drafting.', ['result' => $result]);
+        break;
+      }
 
-            $edges = $productsData['edges'] ?? [];
-            $totalActiveChecked += count($edges);
+      $edges = $productsData['edges'] ?? [];
+      $totalActiveChecked += count($edges);
 
-            if (!$cursor) {
-                Log::info("Shopify returned " . count($edges) . " initial active products to check against active SKUs.");
-            }
-            foreach ($edges as $edge) {
-                $node = $edge['node'];
-                $productId = $node['legacyResourceId'];
-                $variants = $node['variants']['edges'] ?? [];
+      if (!$cursor) {
+        Log::info("Shopify returned " . count($edges) . " initial active products to check against active SKUs.");
+      }
+      foreach ($edges as $edge) {
+        $node = $edge['node'];
+        $productId = $node['legacyResourceId'];
+        $variants = $node['variants']['edges'] ?? [];
 
-                $productSkus = [];
-                foreach ($variants as $vEdge) {
-                    $sku = $vEdge['node']['sku'] ?? null;
-                    if ($sku) {
-                        $productSkus[] = (string) $sku;
-                    }
-                }
-
-                // If none of the product's SKUs are in the active Turum feed
-                $isActive = false;
-                foreach ($productSkus as $sku) {
-                    if (in_array($sku, $activeSkus)) {
-                        $isActive = true;
-                        break;
-                    }
-                }
-
-                if (!$isActive && !empty($productSkus)) {
-                    Log::info("Drafting stale product ID: {$productId}, SKUs: " . implode(', ', $productSkus));
-
-                    $this->updateProduct($productId, [
-                        'product' => [
-                            'id' => $productId,
-                            'status' => 'draft'
-                        ]
-                    ]);
-                    $draftedCount++;
-                }
-            }
-
-            $hasNextPage = $productsData['pageInfo']['hasNextPage'] ?? false;
-            $cursor = $productsData['pageInfo']['endCursor'] ?? null;
+        $productSkus = [];
+        foreach ($variants as $vEdge) {
+          $sku = $vEdge['node']['sku'] ?? null;
+          if ($sku) {
+            $productSkus[] = (string) $sku;
+          }
         }
 
-        return [
-            'drafted' => $draftedCount,
-            'checked' => $totalActiveChecked
-        ];
-    }
-
-    public function cancelOrder($orderId, $reason = 'inventory_shortage')
-    {
-        $endpoint = "https://{$this->domain}/admin/api/{$this->version}/orders/{$orderId}/cancel.json";
-
-        $response = $this->getClient()->post($endpoint, [
-            'reason' => $reason,
-            'email' => true // Notify customer
-        ]);
-
-        if ($response->successful()) {
-            Log::info("Order {$orderId} cancelled successfully.");
-            return true;
+        // If none of the product's SKUs are in the active Turum feed
+        $isActive = false;
+        foreach ($productSkus as $sku) {
+          if (in_array($sku, $activeSkus)) {
+            $isActive = true;
+            break;
+          }
         }
 
-        Log::error("Failed to cancel Order {$orderId}", ['body' => $response->body()]);
-        return false;
+        if (!$isActive && !empty($productSkus)) {
+          Log::info("Drafting stale product ID: {$productId}, SKUs: " . implode(', ', $productSkus));
+
+          $this->updateProduct($productId, [
+            'product' => [
+              'id' => $productId,
+              'status' => 'draft'
+            ]
+          ]);
+          $draftedCount++;
+        }
+      }
+
+      $hasNextPage = $productsData['pageInfo']['hasNextPage'] ?? false;
+      $cursor = $productsData['pageInfo']['endCursor'] ?? null;
     }
+
+    return [
+      'drafted' => $draftedCount,
+      'checked' => $totalActiveChecked
+    ];
+  }
+
+  public function getProductCollections($productId)
+  {
+    $query = <<<'gql'
+        query($id: ID!) {
+          product(id: $id) {
+            collections(first: 20) {
+              edges {
+                node {
+                  handle
+                }
+              }
+            }
+          }
+        }
+        gql;
+
+    $response = $this->graphQL($query, ['id' => $this->formatGid($productId, 'Product')]);
+    $edges = $response['data']['product']['collections']['edges'] ?? [];
+
+    return array_map(function ($edge) {
+      return $edge['node']['handle'];
+    }, $edges);
+  }
+
+  public function cancelOrder($orderId, $reason = 'inventory_shortage')
+  {
+    $query = <<<'gql'
+        mutation orderCancel($id: ID!, $reason: OrderCancelReason!) {
+          orderCancel(id: $id, reason: $reason) {
+            job {
+              id
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+        gql;
+
+    // Map internal reasons to GraphQL OrderCancelReason enum
+    $reasonMap = [
+      'inventory_shortage' => 'INVENTORY',
+      'customer' => 'CUSTOMER',
+      'fraud' => 'FRAUD',
+      'declined' => 'DECLINED',
+      'other' => 'OTHER'
+    ];
+    $gqlReason = $reasonMap[$reason] ?? 'OTHER';
+
+    $response = $this->graphQL($query, [
+      'id' => $this->formatGid($orderId, 'Order'),
+      'reason' => $gqlReason
+    ]);
+
+    $errors = $response['data']['orderCancel']['userErrors'] ?? [];
+    if (!empty($errors)) {
+      Log::error("Failed to cancel Order {$orderId}", ['errors' => $errors]);
+      return false;
+    }
+
+    return true;
+  }
 }

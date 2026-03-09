@@ -54,6 +54,16 @@ class ProcessShopifyOrder implements ShouldQueue
                 continue;
             }
 
+            // check if product is in 'in-store' collection
+            $shopifyProductId = $item['product_id'] ?? null;
+            if ($shopifyProductId) {
+                $collections = $shopifyService->getProductCollections($shopifyProductId);
+                if (in_array('in-store', $collections)) {
+                    Log::info("Skipping Product {$shopifyProductId} (SKU: {$sku}) as it is in 'in-store' collection.");
+                    continue;
+                }
+            }
+
             $shopifyVariantId = $item['variant_id'] ?? null;
             $matchedVariantId = null;
 
