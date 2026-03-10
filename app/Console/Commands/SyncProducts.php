@@ -145,9 +145,13 @@ class SyncProducts extends Command
 
         $draftedCount = $draftResult['drafted'] ?? 0;
         $totalChecked = $draftResult['checked'] ?? 0;
+        $skippedInstore = $draftResult['skipped_instore'] ?? 0;
 
         $this->info("-> Verified {$totalChecked} active products from Shopify.");
+        $this->info("-> Skipped {$skippedInstore} 'In Store' products from drafting.");
         $this->info("-> Drafted {$draftedCount} stale product(s).");
+
+        Log::info("Sync Completed: {$totalChecked} checked, {$skippedInstore} 'In Store' skipped, {$draftedCount} drafted.");
 
         Log::info("--- Turum Product Sync Complete --- [Verified: {$totalChecked}, Drafted: {$draftedCount} stale products]");
         $this->info('Product Sync Complete.');

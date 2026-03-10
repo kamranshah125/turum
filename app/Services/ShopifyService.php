@@ -782,6 +782,7 @@ gql;
   public function draftStaleProducts(array $activeSkus)
   {
     $draftedCount = 0;
+    $skippedInStoreCount = 0;
     $totalActiveChecked = 0;
     $hasNextPage = true;
     $cursor = null;
@@ -866,6 +867,7 @@ gql;
         }
 
         if ($isInstore) {
+          $skippedInStoreCount++;
           // Log::info("Skipping draft check for product {$productId} as it is in 'in-store' collection.");
           continue;
         }
@@ -889,7 +891,8 @@ gql;
 
     return [
       'drafted' => $draftedCount,
-      'checked' => $totalActiveChecked
+      'checked' => $totalActiveChecked,
+      'skipped_instore' => $skippedInStoreCount
     ];
   }
 
