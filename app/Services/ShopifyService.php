@@ -798,6 +798,13 @@ gql;
                   node {
                     id
                     legacyResourceId
+                    collections(first: 5) {
+                      edges {
+                        node {
+                          handle
+                        }
+                      }
+                    }
                     variants(first: 10) {
                       edges {
                         node {
@@ -846,6 +853,21 @@ gql;
             $isActive = true;
             break;
           }
+        }
+
+        // ADDITIONAL CHECK: Skip if in 'in-store' collection
+        $collections = $node['collections']['edges'] ?? [];
+        $isInstore = false;
+        foreach ($collections as $cEdge) {
+          if (($cEdge['node']['handle'] ?? '') === 'in-store') {
+            $isInstore = true;
+            break;
+          }
+        }
+
+        if ($isInstore) {
+          // Log::info("Skipping draft check for product {$productId} as it is in 'in-store' collection.");
+          continue;
         }
 
         if (!$isActive && !empty($productSkus)) {
