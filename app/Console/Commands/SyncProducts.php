@@ -24,12 +24,16 @@ class SyncProducts extends Command
     protected $description = 'Sync products from Turum B2B to Shopify and update metadata';
     protected $turumService;
     protected $shopifyService;
+    protected $pricingService;
+    protected $uspService;
 
-    public function __construct(TurumApiService $turumService, ShopifyService $shopifyService)
+    public function __construct(TurumApiService $turumService, ShopifyService $shopifyService, \App\Services\TurumPricingService $pricingService, \App\Services\TurumUspService $uspService)
     {
         parent::__construct();
         $this->turumService = $turumService;
         $this->shopifyService = $shopifyService;
+        $this->pricingService = $pricingService;
+        $this->uspService = $uspService;
     }
 
     /**
@@ -111,13 +115,17 @@ class SyncProducts extends Command
                 $categoryGid = $this->getTaxonomyGid($smartType);
 
                 // Update the product level properties (Brand, Type, Tags, Body)
+                $existingBodyHtml = $tProduct['description'] ?? '';
+                $uspHtml = $this->uspService->getUspHtml($tProduct['name'] ?? '', $tProduct['brand'] ?? '');
+                $finalBodyHtml = $existingBodyHtml . $uspHtml;
+
                 $productUpdatePayload = [
                     'product' => [
                         'id' => $shopifyProduct['product_id'],
                         'vendor' => $tProduct['brand'] ?? 'Turum',
                         'product_type' => $smartType,
                         'tags' => $tags,
-                        'body_html' => $tProduct['description'] ?? '',
+                        'body_html' => $finalBodyHtml,
                     ]
                 ];
 
@@ -180,7 +188,7 @@ class SyncProducts extends Command
             if ($margin > 0 && $margin < 1) {
                 $calculatedPrice = $originalPrice / (1 - $margin);
             }
-            $finalPrice = round($calculatedPrice, 2);
+            $finalPrice = $this->pricingService->getPremiumPrice($calculatedPrice);
 
             $variantsPayload[] = [
                 'option1' => $sizeOption,
@@ -221,10 +229,14 @@ class SyncProducts extends Command
 
         $categoryGid = $this->getTaxonomyGid($smartType);
 
+        $existingBodyHtml = $tProduct['description'] ?? '';
+        $uspHtml = $this->uspService->getUspHtml($tProduct['name'] ?? '', $tProduct['brand'] ?? '');
+        $finalBodyHtml = $existingBodyHtml . $uspHtml;
+
         $payload = [
             'product' => [
                 'title' => $tProduct['name'],
-                'body_html' => $tProduct['description'] ?? '', // Full description
+                'body_html' => $finalBodyHtml, // Full description + USPs
                 'vendor' => $tProduct['brand'] ?? 'Turum',
                 'product_type' => $smartType,
                 'tags' => $tags,
@@ -288,7 +300,7 @@ class SyncProducts extends Command
             if ($margin > 0 && $margin < 1) {
                 $calculatedPrice = $originalPrice / (1 - $margin);
             }
-            $finalPrice = round($calculatedPrice, 2);
+            $finalPrice = $this->pricingService->getPremiumPrice($calculatedPrice);
             $stock = $tVariant['stock'] ?? 0;
             $turumId = $tVariant['variant_id'];
 

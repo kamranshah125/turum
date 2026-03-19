@@ -44,7 +44,7 @@ class ShopifyService
    */
   protected function getClient(): PendingRequest
   {
-    return Http::withHeaders([
+    return Http::withoutVerifying()->withHeaders([
       'X-Shopify-Access-Token' => $this->token,
       'Content-Type' => 'application/json'
     ])
