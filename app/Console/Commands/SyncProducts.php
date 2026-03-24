@@ -291,6 +291,7 @@ class SyncProducts extends Command
 
         $bulkVariantsPayload = [];
         $bulkInventoryPayload = [];
+        $matchedInventoryItemIds = [];
 
         foreach ($turumVariants as $tVariant) {
             $size = $tVariant['eu_size'] ?? $tVariant['size'] ?? '';
@@ -332,6 +333,7 @@ class SyncProducts extends Command
 
                 if ($locationId && isset($shopifyVariant['inventory_item_id'])) {
                     $inventoryItemId = $shopifyVariant['inventory_item_id'];
+                    $matchedInventoryItemIds[] = $inventoryItemId;
 
                     // Shopify requires activating inventory tracking at a location for newly created variants
                     // before trying to set their on-hand quantities via bulk operations.
@@ -348,6 +350,23 @@ class SyncProducts extends Command
 
                 $bulkVariantsPayload[] = $variantData;
                 $this->info("    - {$actionType} Prepared Variant Size {$size} (Cost: {$originalPrice} | Price: {$finalPrice} | Stock: {$stock})");
+            }
+        }
+
+        if (!$isNew && $locationId) {
+            foreach ($existingShopifyVariants as $sv) {
+                if (isset($sv['inventory_item_id'])) {
+                    $invId = $sv['inventory_item_id'];
+                    if (!in_array($invId, $matchedInventoryItemIds)) {
+                        $bulkInventoryPayload[] = [
+                            'inventoryItemId' => "gid://shopify/InventoryItem/{$invId}",
+                            'locationId' => $locationId,
+                            'quantity' => 0
+                        ];
+                        $staleTitle = $sv['title'] ?? 'Unknown Size';
+                        $this->info("    - [STALE] Marking Variant Size '{$staleTitle}' as out of stock (removed from feed).");
+                    }
+                }
             }
         }
 
