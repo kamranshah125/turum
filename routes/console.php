@@ -11,5 +11,7 @@ Artisan::command('inspire', function () {
 
 Schedule::command('turum:check-reservations')->everyThirtyMinutes();
 
-// Sync Products every hour
-Schedule::command('turum:sync-products')->hourly();
+// Sync Products every 1 hour and 30 minutes (90 minutes)
+Schedule::command('turum:sync-products')->everyThirtyMinutes()->when(function () {
+    return (now()->hour * 60 + now()->minute) % 90 === 0;
+});
