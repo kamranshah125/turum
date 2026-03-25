@@ -8,12 +8,7 @@ Route::get('/', function () {
 
 use App\Http\Controllers\LogViewerController;
 
-Route::prefix('logs')->group(function () {
-    Route::get('/', [LogViewerController::class, 'index'])->name('logs.index');
-    Route::post('/login', [LogViewerController::class, 'login'])->name('logs.login');
-    
-    Route::middleware(['log.viewer'])->group(function () {
-        Route::get('/view', [LogViewerController::class, 'show'])->name('logs.show');
-        Route::get('/logout', [LogViewerController::class, 'logout'])->name('logs.logout');
-    });
-});
+Route::get('/logs', [LogViewerController::class, 'index'])->name('logs.index');
+Route::post('/logs/login', [LogViewerController::class, 'login'])->name('logs.login');
+Route::get('/logs/view', [LogViewerController::class, 'show'])->name('logs.show')->middleware('log.viewer');
+Route::get('/logs/logout', [LogViewerController::class, 'logout'])->name('logs.logout')->middleware('log.viewer');
