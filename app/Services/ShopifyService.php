@@ -311,9 +311,23 @@ gql;
       'descriptionHtml' => $data['product']['body_html'] ?? '',
       'vendor' => $data['product']['vendor'] ?? '',
       'productType' => $data['product']['product_type'] ?? '',
-      'tags' => array_map('trim', explode(',', $data['product']['tags'] ?? '')),
       'status' => strtoupper($data['product']['status'] ?? 'ACTIVE'),
     ];
+
+    $tagsRaw = $data['product']['tags'] ?? '';
+    if (!empty($tagsRaw)) {
+      $input['tags'] = array_map('trim', explode(',', $tagsRaw));
+    }
+
+    if (isset($data['product']['productCategory'])) {
+      $input['productCategory'] = [
+        'productTaxonomyNodeId' => $data['product']['productCategory']['productTaxonomyNodeId'] ?? $data['product']['productCategory']
+      ];
+    }
+
+    if (isset($data['product']['metafields'])) {
+      $input['metafields'] = $data['product']['metafields'];
+    }
 
     // Map Options
     if (!empty($data['product']['options'])) {
@@ -433,6 +447,16 @@ gql;
 
     if (isset($payload['tags'])) {
       $input['tags'] = array_map('trim', explode(',', $payload['tags']));
+    }
+
+    if (isset($payload['productCategory'])) {
+      $input['productCategory'] = [
+        'productTaxonomyNodeId' => $payload['productCategory']['productTaxonomyNodeId'] ?? $payload['productCategory']
+      ];
+    }
+
+    if (isset($payload['metafields'])) {
+      $input['metafields'] = $payload['metafields'];
     }
 
     $query = <<<'gql'

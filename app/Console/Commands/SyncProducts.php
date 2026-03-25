@@ -113,6 +113,7 @@ class SyncProducts extends Command
 
                 // Determine Category GID based on smart type
                 $categoryGid = $this->getTaxonomyGid($smartType);
+                $metafields = $this->getProductFilters($tProduct, $smartType);
 
                 // Update the product level properties (Brand, Type, Tags, Body)
                 $existingBodyHtml = $tProduct['description'] ?? '';
@@ -127,18 +128,12 @@ class SyncProducts extends Command
                         'tags' => $tags,
                         'body_html' => $finalBodyHtml,
                         'status' => 'ACTIVE',
+                        'productCategory' => $categoryGid,
+                        'metafields' => $metafields
                     ]
                 ];
 
                 $this->shopifyService->updateProduct($shopifyProduct['product_id'], $productUpdatePayload);
-
-                // Apply Taxonomy Category via GraphQL (crucial for filters)
-                if ($categoryGid) {
-                    $this->shopifyService->updateProductCategory($shopifyProduct['product_id'], $categoryGid);
-                }
-
-                // Sync all filters (Color and Size) via GraphQL
-                $this->syncProductFilters($shopifyProduct['product_id'], $tProduct, $smartType);
 
                 $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
             } else {
@@ -245,7 +240,9 @@ class SyncProducts extends Command
                     ]
                 ],
                 'variants' => $variantsPayload,
-                'images' => $imagesPayload
+                'images' => $imagesPayload,
+                'productCategory' => $categoryGid,
+                'metafields' => $this->getProductFilters($tProduct, $smartType)
             ]
         ];
 
@@ -253,14 +250,6 @@ class SyncProducts extends Command
 
         if ($createdProduct) {
             $this->info("    -> Product created successfully (ID: {$createdProduct['id']})");
-
-            // Categorize via GraphQL to enable standard metafields
-            if ($categoryGid) {
-                $this->shopifyService->updateProductCategory($createdProduct['id'], $categoryGid);
-            }
-
-            // Sync all filters (Color and Size) via GraphQL after creation and categorization
-            $this->syncProductFilters($createdProduct['id'], $tProduct, $smartType);
 
             // Use the created variants to map Metafields
             // Match by 'option1' (size)
@@ -482,9 +471,10 @@ class SyncProducts extends Command
 
     protected $sizeMapCache = null;
 
-    protected function syncProductFilters($productId, $tProduct, $productType)
+    protected function getProductFilters($tProduct, $productType)
     {
         $metafields = [];
+        $smartType = $productType;
 
         // 1. COLORS
         $extractedColors = $this->extractColors($tProduct['name'] ?? '');
@@ -492,7 +482,6 @@ class SyncProducts extends Command
             $colorGids = $this->getColorGids($extractedColors);
             if (!empty($colorGids)) {
                 $metafields[] = [
-                    'ownerId' => $productId,
                     'namespace' => 'shopify',
                     'key' => 'color-pattern',
                     'value' => json_encode($colorGids),
@@ -502,16 +491,15 @@ class SyncProducts extends Command
         }
 
         // 2. SIZES based on product type
-        $sizeGids = $this->getSizeGids($tProduct['variants'] ?? [], $productType);
+        $sizeGids = $this->getSizeGids($tProduct['variants'] ?? [], $smartType);
         if (!empty($sizeGids)) {
             $key = 'shoe-size'; // Default
-            if ($productType === 'Apparel')
+            if ($smartType === 'Apparel')
                 $key = 'size';
-            if ($productType === 'Accessories')
+            if ($smartType === 'Accessories')
                 $key = 'accessory-size';
 
             $metafields[] = [
-                'ownerId' => $productId,
                 'namespace' => 'shopify',
                 'key' => $key,
                 'value' => json_encode($sizeGids),
@@ -519,9 +507,7 @@ class SyncProducts extends Command
             ];
         }
 
-        if (!empty($metafields)) {
-            $this->shopifyService->setMetafields($metafields);
-        }
+        return $metafields;
     }
 
     protected function getColorGids($colorNames)
