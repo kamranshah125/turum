@@ -126,6 +126,7 @@ class SyncProducts extends Command
                         'product_type' => $smartType,
                         'tags' => $tags,
                         'body_html' => $finalBodyHtml,
+                        'status' => 'ACTIVE',
                     ]
                 ];
 
@@ -138,8 +139,6 @@ class SyncProducts extends Command
 
                 // Sync all filters (Color and Size) via GraphQL
                 $this->syncProductFilters($shopifyProduct['product_id'], $tProduct, $smartType);
-
-                $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
 
                 $this->syncVariants($shopifyProduct['product_id'], $tProduct['variants'], $sku, $allVariants, false);
             } else {
