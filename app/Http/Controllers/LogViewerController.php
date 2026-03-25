@@ -44,50 +44,118 @@ class LogViewerController extends Controller
 
         $search = $request->get('search');
         $level = $request->get('level');
+        $dateFrom = $request->get('date_from'); // YYYY-MM-DD
+        $dateTo = $request->get('date_to'); // YYYY-MM-DD
+        $offset = $request->get('offset');
 
-        // To keep it lightweight, we read last 1000 lines
-        $lines = $this->tailCustom($logPath, 1000);
+        if ($offset === null) {
+            $offset = filesize($logPath);
+        } else {
+            $offset = (int)$offset;
+        }
+
+        $limit = 100;
+        $results = $this->readBackwards($logPath, $offset, $limit, $search, $level, $dateFrom, $dateTo);
         
-        $entries = [];
-        $currentEntry = null;
+        $entries = $results['entries'];
+        $nextOffset = $results['next_offset'];
 
-        foreach ($lines as $line) {
-            if (preg_match('/^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (\w+)\.(\w+): (.*)/', $line, $matches)) {
-                if ($currentEntry) {
-                    if ($this->shouldInclude($currentEntry, $search, $level)) {
-                        $entries[] = $currentEntry;
-                    }
-                }
-                $currentEntry = [
-                    'date' => $matches[1],
-                    'env' => $matches[2],
-                    'level' => $matches[3],
-                    'message' => $matches[4],
-                    'stack' => ''
-                ];
-            } else {
-                if ($currentEntry) {
-                    $currentEntry['stack'] .= $line . "\n";
-                }
-            }
+        if ($request->ajax()) {
+            return response()->json([
+                'html' => view('partials.log_entries', ['logs' => $entries, 'start_index' => $request->get('count', 0)])->render(),
+                'next_offset' => $nextOffset,
+                'has_more' => $nextOffset > 0,
+                'count' => count($entries)
+            ]);
         }
-
-        if ($currentEntry && $this->shouldInclude($currentEntry, $search, $level)) {
-            $entries[] = $currentEntry;
-        }
-
-        // Reverse to show newest first
-        $entries = array_reverse($entries);
 
         return view('logs', [
             'logs' => $entries,
             'search' => $search,
-            'level' => $level
+            'level' => $level,
+            'date_from' => $dateFrom,
+            'date_to' => $dateTo,
+            'next_offset' => $nextOffset
         ]);
     }
 
-    protected function shouldInclude($entry, $search, $level)
+    protected function readBackwards($filepath, $startOffset, $limit, $search, $level, $dateFrom, $dateTo)
     {
+        $f = fopen($filepath, "rb");
+        if ($f === false) return ['entries' => [], 'next_offset' => 0];
+
+        fseek($f, $startOffset);
+
+        $entries = [];
+        $buffer = "";
+        $pos = $startOffset;
+        $stackBuffer = [];
+
+        while ($pos > 0 && count($entries) < $limit) {
+            $readSize = min(32768, $pos);
+            $pos -= $readSize;
+            fseek($f, $pos);
+            $chunk = fread($f, $readSize);
+            
+            $combined = $chunk . $buffer;
+            $lines = explode("\n", $combined);
+            $buffer = array_shift($lines);
+            
+            for ($i = count($lines) - 1; $i >= 0; $i--) {
+                $line = $lines[$i];
+                if (empty(trim($line)) && empty($stackBuffer)) continue;
+
+                if (preg_match('/^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\] (\w+)\.(\w+): (.*)/', $line, $matches)) {
+                    $entryDateOnly = $matches[1];
+                    $entryFullDate = $entryDateOnly . ' ' . $matches[2];
+
+                    // Early Exit Optimization: Since we read backwards, if entryDate is BEFORE dateFrom,
+                    // we can stop reading the whole file.
+                    if ($dateFrom && $entryDateOnly < $dateFrom) {
+                        $pos = 0; // Stop outer while loop
+                        break 2; // Break inner for loop
+                    }
+
+                    $tempEntry = [
+                        'date' => $entryFullDate,
+                        'env' => $matches[3],
+                        'level' => $matches[4],
+                        'message' => $matches[5],
+                        'stack' => implode("\n", array_reverse($stackBuffer))
+                    ];
+
+                    $stackBuffer = [];
+
+                    if ($this->shouldInclude($tempEntry, $search, $level, $dateFrom, $dateTo)) {
+                        $entries[] = $tempEntry;
+                        if (count($entries) >= $limit) break 2;
+                    }
+                } else {
+                    $stackBuffer[] = $line;
+                }
+            }
+        }
+
+        fclose($f);
+
+        return [
+            'entries' => $entries,
+            'next_offset' => $pos
+        ];
+    }
+
+    protected function shouldInclude($entry, $search, $level, $dateFrom, $dateTo)
+    {
+        $entryDateOnly = substr($entry['date'], 0, 10);
+
+        if ($dateFrom && $entryDateOnly < $dateFrom) {
+            return false;
+        }
+
+        if ($dateTo && $entryDateOnly > $dateTo) {
+            return false;
+        }
+
         if ($level && strtolower($entry['level']) !== strtolower($level)) {
             return false;
         }
@@ -101,34 +169,5 @@ class LogViewerController extends Controller
         }
 
         return true;
-    }
-
-    /**
-     * Efficiently read the last N lines of a file.
-     */
-    protected function tailCustom($filepath, $lines = 100)
-    {
-        $f = fopen($filepath, "rb");
-        if ($f === false) return [];
-
-        // Jump to ten characters before the end of the file
-        fseek($f, -1, SEEK_END);
-
-        $lineCount = 0;
-        $output = '';
-        $chunk = '';
-
-        // Read backwards
-        while (ftell($f) > 0 && $lineCount < $lines) {
-            $char = fread($f, 1);
-            if ($char === "\n") {
-                $lineCount++;
-            }
-            $output = $char . $output;
-            fseek($f, -2, SEEK_CUR);
-        }
-
-        fclose($f);
-        return explode("\n", trim($output));
     }
 }
