@@ -308,7 +308,7 @@ gql;
   {
     $input = [
       'title' => $data['product']['title'] ?? '',
-      'bodyHtml' => $data['product']['body_html'] ?? '',
+      'descriptionHtml' => $data['product']['body_html'] ?? '',
       'vendor' => $data['product']['vendor'] ?? '',
       'productType' => $data['product']['product_type'] ?? '',
       'tags' => array_map('trim', explode(',', $data['product']['tags'] ?? '')),
@@ -423,7 +423,7 @@ gql;
     if (isset($payload['title']))
       $input['title'] = $payload['title'];
     if (isset($payload['body_html']))
-      $input['bodyHtml'] = $payload['body_html'];
+      $input['descriptionHtml'] = $payload['body_html'];
     if (isset($payload['vendor']))
       $input['vendor'] = $payload['vendor'];
     if (isset($payload['product_type']))
