@@ -53,8 +53,19 @@ class TurumUspService
             ]
         ],
         'asics' => [
-            'general' => [],
-            'models' => []
+            'general' => [
+                'Bekend om ultiem comfort & support',
+                'Geavanceerde GEL™ demping',
+                'Performance meets lifestyle',
+                'Sterk in retro runner designs'
+            ],
+            'models' => [
+                'gel-nyc'    => ['Moderne retro runner', 'GEL™ demping voor comfort', 'Mix van heritage & tech', 'Perfect voor dagelijks gebruik'],
+                'gel-kayano' => ['Premium stability sneaker', 'Maximale ondersteuning', 'High-end comfort technologie', 'Ideaal voor lange dagen'],
+                'gel-1130'   => ['Retro running aesthetic', 'Lichtgewicht & ademend', 'Populaire streetwear keuze', 'Comfortabele allrounder'],
+                'gt-2160'    => ['Y2K running design', 'Strakke, technische look', 'GEL™ cushioning', 'Trendgevoelig model'],
+                'skyhand'    => ['Vintage court style', 'Clean & minimalistisch', 'Suede & premium feel', 'Makkelijk te stylen']
+            ]
         ]
     ];
 
