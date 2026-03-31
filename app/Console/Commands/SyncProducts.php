@@ -14,7 +14,7 @@ class SyncProducts extends Command
      *
      * @var string
      */
-    protected $signature = 'turum:sync-products';
+    protected $signature = 'turum:sync-products {--sku= : Sync only a specific SKU for debugging}';
 
     /**
      * The console command description.
@@ -68,6 +68,18 @@ class SyncProducts extends Command
 
         // Check for common wrapper keys
         $items = $products['products'] ?? $products['data'] ?? $products;
+        $targetSku = $this->option('sku');
+        if ($targetSku) {
+            $this->info("Filtering for SKU: {$targetSku}");
+            $items = array_filter($items, function ($item) use ($targetSku) {
+                return ($item['sku'] ?? '') === $targetSku;
+            });
+            if (empty($items)) {
+                $this->error("SKU {$targetSku} not found in Turum feed.");
+                return;
+            }
+        }
+
         $activeTurumSkus = [];
         $totalItems = count($items);
 
@@ -483,7 +495,7 @@ class SyncProducts extends Command
             if (!empty($colorGids)) {
                 $metafields[] = [
                     'namespace' => 'shopify',
-                    'key' => 'color-pattern',
+                    'key' => 'color_pattern',
                     'value' => json_encode($colorGids),
                     'type' => 'list.metaobject_reference'
                 ];
@@ -493,11 +505,11 @@ class SyncProducts extends Command
         // 2. SIZES based on product type
         $sizeGids = $this->getSizeGids($tProduct['variants'] ?? [], $smartType);
         if (!empty($sizeGids)) {
-            $key = 'shoe-size'; // Default
+            $key = 'shoe_size'; // Default
             if ($smartType === 'Apparel')
                 $key = 'size';
             if ($smartType === 'Accessories')
-                $key = 'accessory-size';
+                $key = 'accessory_size';
 
             $metafields[] = [
                 'namespace' => 'shopify',

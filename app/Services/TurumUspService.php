@@ -106,10 +106,12 @@ class TurumUspService
             }
         }
 
-        // Determine specific model
+        // Determine model within matched brand
         $detectedModel = '';
+        $normalizedName = str_replace('-', ' ', $nameLower);
         foreach (array_keys($this->usps[$detectedBrand]['models']) as $modelKey) {
-            if (str_contains($nameLower, $modelKey)) {
+            $normalizedModelKey = str_replace('-', ' ', $modelKey);
+            if (str_contains($normalizedName, $normalizedModelKey)) {
                 $detectedModel = $modelKey;
                 break;
             }
