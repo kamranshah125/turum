@@ -14,7 +14,7 @@ class SyncProducts extends Command
      *
      * @var string
      */
-    protected $signature = 'turum:sync-products {--sku= : Sync only a specific SKU for debugging}';
+    protected $signature = 'turum:sync-products';
 
     /**
      * The console command description.
@@ -68,17 +68,6 @@ class SyncProducts extends Command
 
         // Check for common wrapper keys
         $items = $products['products'] ?? $products['data'] ?? $products;
-        $targetSku = $this->option('sku');
-        if ($targetSku) {
-            $this->info("Filtering for SKU: {$targetSku}");
-            $items = array_filter($items, function ($item) use ($targetSku) {
-                return ($item['sku'] ?? '') === $targetSku;
-            });
-            if (empty($items)) {
-                $this->error("SKU {$targetSku} not found in Turum feed.");
-                return;
-            }
-        }
 
         $activeTurumSkus = [];
         $totalItems = count($items);

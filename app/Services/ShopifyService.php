@@ -169,7 +169,18 @@ class ShopifyService
       'variables' => empty($variables) ? (object) [] : $variables,
     ]);
 
-    return $response->json();
+    $json = $response->json();
+
+    // Log top-level GraphQL errors (syntax, schema, auth, etc.)
+    if (!empty($json['errors'])) {
+      Log::error("Shopify GraphQL Top-level Errors", [
+          'errors' => $json['errors'], 
+          'query_snippet' => substr($query, 0, 100),
+          'variables' => $variables
+      ]);
+    }
+
+    return $json;
   }
 
   public function findProductBySku($sku)
@@ -320,9 +331,7 @@ gql;
     }
 
     if (isset($data['product']['productCategory'])) {
-      $input['productCategory'] = [
-        'productTaxonomyNodeId' => $data['product']['productCategory']['productTaxonomyNodeId'] ?? $data['product']['productCategory']
-      ];
+      $input['category'] = $data['product']['productCategory']['productTaxonomyNodeId'] ?? $data['product']['productCategory'];
     }
 
     if (isset($data['product']['metafields'])) {
@@ -450,12 +459,12 @@ gql;
     }
 
     if (isset($payload['productCategory'])) {
-      $input['productCategory'] = [
-        'productTaxonomyNodeId' => $payload['productCategory']['productTaxonomyNodeId'] ?? $payload['productCategory']
-      ];
+      $input['category'] = $payload['productCategory']['productTaxonomyNodeId'] ?? $payload['productCategory'];
     }
 
-    if (isset($payload['metafields'])) {
+    // Capture metafields for initial attempt
+    $hasMetafields = isset($payload['metafields']);
+    if ($hasMetafields) {
       $input['metafields'] = $payload['metafields'];
     }
 
@@ -464,6 +473,7 @@ gql;
           productUpdate(input: $input) {
             product {
               id
+              status
             }
             userErrors {
               field
@@ -475,9 +485,41 @@ gql;
 
     $response = $this->graphQL($query, ['input' => $input]);
 
-    $errors = $response['data']['productUpdate']['userErrors'] ?? [];
-    if (!empty($errors)) {
-      Log::error("Shopify Product Update Errors", ['errors' => $errors, 'id' => $productId]);
+    // Check for top-level GraphQL errors or productUpdate specific userErrors
+    $topLevelErrors = $response['errors'] ?? [];
+    $userErrors = $response['data']['productUpdate']['userErrors'] ?? [];
+
+    if (!empty($topLevelErrors) || !empty($userErrors)) {
+      $allErrorMessages = array_merge(
+        array_column($topLevelErrors, 'message'),
+        array_column($userErrors, 'message')
+      );
+
+      $errorString = implode(' | ', $allErrorMessages);
+
+      // If errors are related to metafields, retry without them to ensure basic product details (like status) are updated
+      if ($hasMetafields && (str_contains($errorString, 'metafield') || str_contains($errorString, 'Metafield'))) {
+        Log::warning("Shopify Product Update failed for Metafields. Retrying without them for product {$productId}", ['errors' => $allErrorMessages]);
+
+        unset($input['metafields']);
+        $retryResponse = $this->graphQL($query, ['input' => $input]);
+
+        $retryUserErrors = $retryResponse['data']['productUpdate']['userErrors'] ?? [];
+        if (empty($retryResponse['errors']) && empty($retryUserErrors)) {
+          Log::info("Shopify Product Status Activated successfully for {$productId} after stripping Metafields.");
+          return true;
+        }
+
+        Log::error("Shopify Product Update failed even without Metafields for {$productId}", [
+          'errors' => array_merge($retryResponse['errors'] ?? [], $retryUserErrors)
+        ]);
+        return false;
+      }
+
+      Log::error("Shopify Product Update Errors for {$productId}", [
+          'topLevelErrors' => $topLevelErrors,
+          'userErrors' => $userErrors
+      ]);
       return false;
     }
 
